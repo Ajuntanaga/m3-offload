@@ -1,5 +1,5 @@
 name: M3 recorded VST3 integration
-run-name: 'VST3 ordinary recording / ${{ inputs.source_sha }}'
+run-name: 'VST3 ${{ inputs.scenario }} / ${{ inputs.source_sha }}'
 on:
   workflow_dispatch:
     inputs:
@@ -7,6 +7,14 @@ on:
         description: Full commit in Ajuntanaga/polyphonic-audio-to-midi
         required: true
         type: string
+      scenario:
+        description: Bounded accepting or rejection/Panic replay
+        required: true
+        type: choice
+        default: accepting
+        options:
+          - accepting
+          - reject-off-panic
 permissions:
   contents: read
 defaults:
@@ -68,7 +76,7 @@ jobs:
       - name: Check recording and callback accounting contracts
         working-directory: source
         run: |
-          python3 -B -m unittest tests.test_portable_vst3_corpus_replay 2>&1 | tee build/github-results/contracts.log
+          python3 -B -m unittest tests.test_portable_vst3_corpus_replay tests.test_portable_vst3_recovery_replay 2>&1 | tee build/github-results/contracts.log
       - name: Install VSTGUI build dependencies
         run: |
           sudo apt-get update
@@ -85,6 +93,7 @@ jobs:
           cmake -S . -B build/vst3-corpus -DCMAKE_BUILD_TYPE=Release 2>&1 | tee build/github-results/configure.log
           cmake --build build/vst3-corpus --target m3_vst3_corpus_replay --parallel 2 2>&1 | tee build/github-results/build.log
       - name: Feed the ordinary recording through VST3 and its MIDI ledger
+        if: inputs.scenario == 'accepting'
         working-directory: source
         run: |
           python3 -B -m tools.portable_vst3_corpus_replay \
@@ -94,6 +103,17 @@ jobs:
             --reference-checkpoint docs/recovery/github-independent-midi-ownership-20261109.json \
             --source-sha "$SOURCE_SHA" \
             --output build/github-results/vst3-corpus 2>&1 | tee build/github-results/runner.log
+      - name: Reject one real note-off and resume the recording after Panic
+        if: inputs.scenario == 'reject-off-panic'
+        working-directory: source
+        run: |
+          python3 -B -m tools.portable_vst3_recovery_replay \
+            --binary build/vst3-corpus/m3_vst3_corpus_replay \
+            --corpus "$RUNNER_TEMP/m3-inputs/corpus" \
+            --manifest build/github-results/runtime-manifest.json \
+            --reference-checkpoint docs/recovery/github-independent-midi-ownership-20261109.json \
+            --source-sha "$SOURCE_SHA" \
+            --output build/github-results/vst3-recovery 2>&1 | tee build/github-results/runner.log
       - name: Keep small reports and diagnostics
         if: always()
         uses: actions/upload-artifact@v7
