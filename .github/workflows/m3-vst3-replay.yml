@@ -1,0 +1,119 @@
+name: M3 recorded VST3 integration
+run-name: 'VST3 ordinary recording / ${{ inputs.source_sha }}'
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Full commit in Ajuntanaga/polyphonic-audio-to-midi
+        required: true
+        type: string
+permissions:
+  contents: read
+defaults:
+  run:
+    shell: bash
+concurrency:
+  group: m3-vst3-replay
+  cancel-in-progress: false
+env:
+  SOURCE_SHA: ${{ inputs.source_sha }}
+  INPUT_TAG: corpus-20261108
+  INPUT_SHA256: adf6e36f2883538cfa3b0500ca0d936ed64fc6a1e12aeae3bd89e40dbf7c4254
+jobs:
+  replay:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Verify public destination and source selection
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test "$GITHUB_REPOSITORY" = Ajuntanaga/m3-offload
+          test "$(gh api "repos/$GITHUB_REPOSITORY" --jq '.private')" = false
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+      - uses: actions/checkout@v7
+        with:
+          repository: Ajuntanaga/polyphonic-audio-to-midi
+          ref: ${{ inputs.source_sha }}
+          path: source
+          submodules: recursive
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Download and verify the retained recording bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
+        working-directory: source
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          mkdir -p "$RUNNER_TEMP/m3-inputs" build/github-results
+          gh release download "$INPUT_TAG" --repo "$GITHUB_REPOSITORY" --pattern recovery-inputs.tar.gz --dir "$RUNNER_TEMP/m3-inputs"
+          printf '%s  %s\n' "$INPUT_SHA256" "$RUNNER_TEMP/m3-inputs/recovery-inputs.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/m3-inputs/recovery-inputs.tar.gz" -C "$RUNNER_TEMP/m3-inputs"
+          rm "$RUNNER_TEMP/m3-inputs/recovery-inputs.tar.gz"
+          python3 - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          original = Path(os.environ['RUNNER_TEMP']) / 'm3-inputs/recovery-inputs.json'
+          manifest = json.loads(original.read_text())
+          manifest['source'] = dict(repository='Ajuntanaga/polyphonic-audio-to-midi',
+              commit=os.environ['SOURCE_SHA'], provider='github-actions',
+              worker_repository=os.environ['GITHUB_REPOSITORY'],
+              run_id=os.environ['GITHUB_RUN_ID'], run_attempt=os.environ['GITHUB_RUN_ATTEMPT'],
+              input_release=os.environ['INPUT_TAG'], input_bundle_sha256=os.environ['INPUT_SHA256'],
+              original_input_manifest_sha256=hashlib.sha256(original.read_bytes()).hexdigest())
+          Path('build/github-results/runtime-manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+          PY
+      - name: Check recording and callback accounting contracts
+        working-directory: source
+        run: |
+          python3 -B -m unittest tests.test_portable_vst3_corpus_replay 2>&1 | tee build/github-results/contracts.log
+      - name: Install VSTGUI build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends \
+            libexpat1-dev libglib2.0-dev libcairo2-dev libfontconfig1-dev \
+            libfreetype6-dev libpango1.0-dev libwayland-dev \
+            libgtkmm-3.0-dev libatkmm-1.6-dev libsqlite3-dev pkg-config \
+            wayland-protocols \
+            libx11-dev libx11-xcb-dev libxcb-cursor-dev libxcb-keysyms1-dev \
+            libxcb-util-dev libxcb-xkb-dev libxkbcommon-dev libxkbcommon-x11-dev
+      - name: Build the instrumented VST3 processor on GitHub
+        working-directory: source
+        run: |
+          cmake -S . -B build/vst3-corpus -DCMAKE_BUILD_TYPE=Release 2>&1 | tee build/github-results/configure.log
+          cmake --build build/vst3-corpus --target m3_vst3_corpus_replay --parallel 2 2>&1 | tee build/github-results/build.log
+      - name: Feed the ordinary recording through VST3 and its MIDI ledger
+        working-directory: source
+        run: |
+          python3 -B -m tools.portable_vst3_corpus_replay \
+            --binary build/vst3-corpus/m3_vst3_corpus_replay \
+            --corpus "$RUNNER_TEMP/m3-inputs/corpus" \
+            --manifest build/github-results/runtime-manifest.json \
+            --reference-checkpoint docs/recovery/github-independent-midi-ownership-20261109.json \
+            --source-sha "$SOURCE_SHA" \
+            --output build/github-results/vst3-corpus 2>&1 | tee build/github-results/runner.log
+      - name: Keep small reports and diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: m3-vst3-report-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            source/build/github-results/**/*.json
+            source/build/github-results/**/*.log
+            source/build/github-results/**/*.stderr
+      - name: Keep compressed callback evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: m3-vst3-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          compression-level: 1
+          if-no-files-found: warn
+          path: |
+            source/build/github-results/**/*.tsv
+            source/build/github-results/**/*.gz
+            source/build/vst3-corpus/m3_vst3_corpus_replay
