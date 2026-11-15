@@ -8,15 +8,17 @@ on:
         required: true
         type: string
       scenario:
-        description: Bounded accepting or rejection/Panic replay
+        description: Bounded accepting, rejection/Panic or completion-retention replay
         required: true
         type: choice
         default: accepting
         options:
           - accepting
           - reject-off-panic
+          - completion-midi-retention
 permissions:
   contents: read
+  actions: read
 defaults:
   run:
     shell: bash
@@ -77,6 +79,19 @@ jobs:
         working-directory: source
         run: |
           python3 -B -m unittest tests.test_portable_vst3_corpus_replay tests.test_portable_vst3_recovery_replay 2>&1 | tee build/github-results/contracts.log
+      - name: Check saved MIDI comparison contracts
+        if: inputs.scenario == 'completion-midi-retention'
+        working-directory: source
+        run: |
+          python3 -B -m unittest tests.test_portable_vst3_completion_midi_replay 2>&1 | tee build/github-results/completion-contracts.log
+      - name: Fetch the existing saved MIDI artifact on the worker
+        if: inputs.scenario == 'completion-midi-retention'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        working-directory: source
+        run: |
+          gh api repos/Ajuntanaga/m3-offload/actions/artifacts/14177008851/zip > "$RUNNER_TEMP/completion-midi-reference.zip"
+          printf '%s  %s\n' 83d6f9b5f2c23f78608f159dda12dbbfb6e00efd0137b4697bfd03c7349116c3 "$RUNNER_TEMP/completion-midi-reference.zip" | sha256sum --check
       - name: Install VSTGUI build dependencies
         run: |
           sudo apt-get update
@@ -114,6 +129,18 @@ jobs:
             --reference-checkpoint docs/recovery/github-independent-midi-ownership-20261109.json \
             --source-sha "$SOURCE_SHA" \
             --output build/github-results/vst3-recovery 2>&1 | tee build/github-results/runner.log
+      - name: Compare completion-retention VST3 callbacks with both saved references
+        if: inputs.scenario == 'completion-midi-retention'
+        working-directory: source
+        run: |
+          python3 -B -m tools.portable_vst3_completion_midi_replay \
+            --binary build/vst3-corpus/m3_vst3_corpus_replay \
+            --corpus "$RUNNER_TEMP/m3-inputs/corpus" \
+            --manifest build/github-results/runtime-manifest.json \
+            --reference docs/recovery/completion-midi-retention-vst3-references-20261115.json \
+            --evidence-archive "$RUNNER_TEMP/completion-midi-reference.zip" \
+            --source-sha "$SOURCE_SHA" \
+            --output build/github-results/vst3-completion-midi-retention 2>&1 | tee build/github-results/runner.log
       - name: Keep small reports and diagnostics
         if: always()
         uses: actions/upload-artifact@v7
