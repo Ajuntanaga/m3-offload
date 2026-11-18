@@ -18,9 +18,10 @@ on:
         options: [physical-middle, physical-highmid, physical-high, physical-long, ordinary, isolated-05, extended-middle, synthetic-four]
         default: physical-middle
       assignment_diagnostic:
-        description: Observe fixed-competition assignment with untraced parity
-        type: boolean
-        default: false
+        description: Fixed-competition assignment tracing or calibrated prior experiment
+        type: choice
+        options: ["false", "true", calibrated-prior]
+        default: "false"
       fundamental_veto_check:
         description: Offline fundamental admission experiment (fixed competition only)
         type: boolean
@@ -78,7 +79,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if [[ "$ASSIGNMENT_DIAGNOSTIC" = true ]]; then test "$TASK" = ordinary-harmonic-fixed-competition; fi
+          if [[ "$ASSIGNMENT_DIAGNOSTIC" != false ]]; then test "$TASK" = ordinary-harmonic-fixed-competition; fi
           if [[ "$FUNDAMENTAL_VETO_CHECK" = true ]]; then test "$TASK" = ordinary-harmonic-fixed-competition; fi
           test "$GITHUB_REPOSITORY" = Ajuntanaga/m3-offload
           test "$(gh api "repos/$GITHUB_REPOSITORY" --jq '.private')" = false
@@ -526,6 +527,7 @@ jobs:
           python3 -B -m unittest tests.test_harmonic_admission_cues tests.test_portable_ordinary_harmonic_admission 2>&1 | tee build/github-results/contracts.log
           extra=()
           if [[ "$ASSIGNMENT_DIAGNOSTIC" = true ]]; then extra+=(--assignment-diagnostic); fi
+          if [[ "$ASSIGNMENT_DIAGNOSTIC" = calibrated-prior ]]; then extra+=(--calibrated-assignment-prior --assignment-diagnostic); fi
           if [[ "$FUNDAMENTAL_VETO_CHECK" = true ]]; then extra+=(--fundamental-veto-check); fi
           if [[ "$TASK" = ordinary-harmonic-competition || "$TASK" = ordinary-harmonic-fixed-competition ]]; then
             python3 -B -m unittest tests.test_harmonic_competition_cues 2>&1 | tee -a build/github-results/contracts.log
