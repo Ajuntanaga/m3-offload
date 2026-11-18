@@ -20,7 +20,7 @@ on:
       assignment_diagnostic:
         description: Fixed-competition assignment tracing or calibrated prior experiment
         type: choice
-        options: ["false", "true", calibrated-prior, joint-rescue, pending-posterior, posterior-loss, energy-weighted, common-detuning]
+        options: ["false", "true", calibrated-prior, joint-rescue, pending-posterior, posterior-loss, energy-weighted, common-detuning, activation-gates]
         default: "false"
       fundamental_veto_check:
         description: Offline fundamental admission experiment (fixed competition only)
@@ -79,7 +79,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if [[ "$ASSIGNMENT_DIAGNOSTIC" != false ]]; then test "$TASK" = ordinary-harmonic-fixed-competition; fi
+          if [[ "$ASSIGNMENT_DIAGNOSTIC" = activation-gates ]]; then test "$TASK" = assignment-trace; elif [[ "$ASSIGNMENT_DIAGNOSTIC" != false ]]; then test "$TASK" = ordinary-harmonic-fixed-competition; fi
           if [[ "$FUNDAMENTAL_VETO_CHECK" = true ]]; then test "$TASK" = ordinary-harmonic-fixed-competition; fi
           test "$GITHUB_REPOSITORY" = Ajuntanaga/m3-offload
           test "$(gh api "repos/$GITHUB_REPOSITORY" --jq '.private')" = false
@@ -587,7 +587,8 @@ jobs:
         working-directory: source
         run: |
           label_args=()
-          if [[ "$LABEL_INDEX" != -1 ]]; then label_args=(--label-index "$LABEL_INDEX"); fi
+          if [[ "$ASSIGNMENT_DIAGNOSTIC" = activation-gates ]]; then label_args+=(--activation-gates); fi
+          if [[ "$LABEL_INDEX" != -1 ]]; then label_args+=(--label-index "$LABEL_INDEX"); fi
           python3 -B -m tools.portable_assignment_trace --binary build/portable/m3_replay --corpus "$RUNNER_TEMP/m3-inputs/corpus" --manifest build/github-results/runtime-manifest.json --output build/github-results/trace --dataset "$DATASET" --note "$NOTE" "${label_args[@]}" 2>&1 | tee build/github-results/runner.log
       - name: Compare OFF and ON across the recorded corpus
         if: inputs.task == 'corpus-recovery' || inputs.task == 'projection-preview-corpus' || inputs.task == 'spectral-lane-collision-corpus'
