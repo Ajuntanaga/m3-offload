@@ -20,7 +20,7 @@ on:
       assignment_diagnostic:
         description: Fixed-competition assignment tracing or calibrated prior experiment
         type: choice
-        options: ["false", "true", calibrated-prior, joint-rescue, pending-posterior, posterior-loss, energy-weighted, common-detuning, activation-gates, local-onset]
+        options: ["false", "true", calibrated-prior, joint-rescue, pending-posterior, posterior-loss, energy-weighted, common-detuning, activation-gates, local-onset, local-onset-trace]
         default: "false"
       fundamental_veto_check:
         description: Offline fundamental admission experiment (fixed competition only)
@@ -532,6 +532,7 @@ jobs:
           if [[ "$ASSIGNMENT_DIAGNOSTIC" = pending-posterior ]]; then extra+=(--calibrated-assignment-prior --joint-rescue-eligibility --pending-string-posterior --assignment-diagnostic); fi
           if [[ "$ASSIGNMENT_DIAGNOSTIC" = energy-weighted ]]; then extra+=(--calibrated-assignment-prior --joint-rescue-eligibility --pending-string-posterior --energy-weighted-descriptor); fi
           if [[ "$ASSIGNMENT_DIAGNOSTIC" = local-onset ]]; then extra+=(--local-onset-evidence); fi
+          if [[ "$ASSIGNMENT_DIAGNOSTIC" = local-onset-trace ]]; then extra+=(--local-onset-evidence --assignment-diagnostic); fi
           if [[ "$ASSIGNMENT_DIAGNOSTIC" = common-detuning ]]; then extra+=(--calibrated-assignment-prior --joint-rescue-eligibility --pending-string-posterior --common-detuning-support); fi
           if [[ "$ASSIGNMENT_DIAGNOSTIC" = posterior-loss ]]; then extra+=(--calibrated-assignment-prior --joint-rescue-eligibility --pending-string-posterior --posterior-loss-diagnostic); fi
           if [[ "$FUNDAMENTAL_VETO_CHECK" = true ]]; then extra+=(--fundamental-veto-check); fi
