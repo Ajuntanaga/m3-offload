@@ -453,9 +453,9 @@ jobs:
           OMP_NUM_THREADS: '1'
         run: |
           python3 -m pip install 'numpy>=2,<3' 'scipy>=1.14,<2'
-          python3 -B -m unittest tests.test_harmonic_source_continuity 2>&1 | tee build/github-results/continuity-contracts.log
+          python3 -B -m unittest tests.test_harmonic_source_continuity tests.test_harmonic_competition_cues 2>&1 | tee build/github-results/continuity-contracts.log
           gh api repos/Ajuntanaga/m3-offload/actions/artifacts/14289093862/zip > "$RUNNER_TEMP/continuity-evidence.zip" 2> build/github-results/continuity-download.stderr
-          python3 -B -m tools.portable_ordinary_source_continuity --corpus "$RUNNER_TEMP/m3-inputs/corpus" --manifest build/github-results/runtime-manifest.json --reference docs/recovery/ordinary-harmonic-fixed-competition-references-20261116.json --archive "$RUNNER_TEMP/continuity-evidence.zip" --output build/github-results/ordinary-source-continuity 2>&1 | tee build/github-results/continuity-runner.log
+          python3 -B -m tools.portable_ordinary_source_continuity --all-admissions --corpus "$RUNNER_TEMP/m3-inputs/corpus" --manifest build/github-results/runtime-manifest.json --reference docs/recovery/ordinary-harmonic-fixed-competition-references-20261116.json --archive "$RUNNER_TEMP/continuity-evidence.zip" --output build/github-results/ordinary-source-continuity 2>&1 | tee build/github-results/continuity-runner.log
       - name: Observe saved admission policies around extra attacks
         if: inputs.task == 'suppressed-adjacent-admission-trace'
         working-directory: source
