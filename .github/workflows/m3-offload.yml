@@ -408,13 +408,9 @@ jobs:
           OMP_NUM_THREADS: '1'
         run: |
           test "$DATASET" = ordinary
-          gh release download cross-pitch-shape-20261120 --repo "$GITHUB_REPOSITORY" --pattern joint-fit-inputs.tar.gz --dir "$RUNNER_TEMP/m3-inputs"
-          printf '%s  %s\n' '9a30d58fc47c8ae6be4c419a0fc38622051ecfbfc23b463aa6c6eda68eeda991' "$RUNNER_TEMP/m3-inputs/joint-fit-inputs.tar.gz" | sha256sum --check
+          gh release download cross-pitch-counterexample-20261120 --repo "$GITHUB_REPOSITORY" --pattern joint-fit-inputs.tar.gz --dir "$RUNNER_TEMP/m3-inputs"
+          printf '%s  %s\n' '62bca1eb033a7fb3f576403c9135ec864d3529ca0c6ba4eb27b25a28bd4edd20' "$RUNNER_TEMP/m3-inputs/joint-fit-inputs.tar.gz" | sha256sum --check
           tar -xzf "$RUNNER_TEMP/m3-inputs/joint-fit-inputs.tar.gz" -C "$RUNNER_TEMP/m3-inputs"
-          mkdir -p "$RUNNER_TEMP/m3-inputs/isolated"
-          gh release download partial-identity-note52-20261109 --repo "$GITHUB_REPOSITORY" --pattern recovery-inputs.tar.gz --dir "$RUNNER_TEMP/m3-inputs/isolated"
-          printf '%s  %s\n' '4f7efa2ea0ba4d9025ff35c22d2bc48c9a5199a1ebb9b83c422c1bf10038829e' "$RUNNER_TEMP/m3-inputs/isolated/recovery-inputs.tar.gz" | sha256sum --check
-          tar -xzf "$RUNNER_TEMP/m3-inputs/isolated/recovery-inputs.tar.gz" -C "$RUNNER_TEMP/m3-inputs/isolated"
           python3 -m pip install 'numpy>=2,<3' 'scipy>=1.14,<2'
           python3 -B -m unittest tests.test_portable_cross_pitch_shape tests.test_cross_pitch_shape_fit tests.test_refined_cross_pitch_shape 2>&1 | tee build/github-results/joint-fit-contracts.log
           python3 -B -m tools.portable_cross_pitch_shape --refine-frequencies --manifest "$RUNNER_TEMP/m3-inputs/manifest.json" --input-root "$RUNNER_TEMP/m3-inputs" --output build/github-results/cross-pitch-shape/report.json 2>&1 | tee build/github-results/joint-fit-runner.log
