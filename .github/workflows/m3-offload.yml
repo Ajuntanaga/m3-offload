@@ -401,16 +401,22 @@ jobs:
           M3_SOURCE_SHA: ${{ inputs.source_sha }}
         run: |
           mkdir -p "$RUNNER_TEMP/m3-parents" build/github-results
-          gh release download runtime-profile-multipitch-20261120 --repo "$GITHUB_REPOSITORY" --pattern recovery-inputs.tar.gz --dir "$RUNNER_TEMP/m3-parents"
-          gh release download mixture-component-20261120 --repo "$GITHUB_REPOSITORY" --pattern component-inputs.tar.gz --dir "$RUNNER_TEMP/m3-parents"
-          gh release download octave-parent-inputs-20261120 --repo "$GITHUB_REPOSITORY" --pattern string-02-input.tar.gz --dir "$RUNNER_TEMP/m3-parents"
-          cd "$RUNNER_TEMP/m3-parents"
-          echo 'f7b460937fc59a47f7dc28beb5f401cf7fedd47cb55d46bad50924108e83dd69  recovery-inputs.tar.gz' | sha256sum --check
-          echo '00d508162bb35ff21ed30a538bcfecb3c74991554b4f1546bd54607a67f8f4fd  component-inputs.tar.gz' | sha256sum --check
-          echo '335cdb985d87d2ebfd08e98c1dec516d93baec460070acda6b2bb822e438a427  string-02-input.tar.gz' | sha256sum --check
-          tar -xzf recovery-inputs.tar.gz
-          tar -xzf component-inputs.tar.gz
-          tar -xzf string-02-input.tar.gz
+          if [[ "$TASK" = octave-common-estimator ]]; then
+            gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/14671741349/zip" > "$RUNNER_TEMP/retained-parents.zip"
+            echo "781d9ebf1efa35e65a0ee0a2a293a8aa505b30735d48e00355a7be49cbc9127d  $RUNNER_TEMP/retained-parents.zip" | sha256sum --check
+            unzip -p "$RUNNER_TEMP/retained-parents.zip" octave-common-estimator/report.json > "$RUNNER_TEMP/retained-parents.json"
+          else
+            gh release download runtime-profile-multipitch-20261120 --repo "$GITHUB_REPOSITORY" --pattern recovery-inputs.tar.gz --dir "$RUNNER_TEMP/m3-parents"
+            gh release download mixture-component-20261120 --repo "$GITHUB_REPOSITORY" --pattern component-inputs.tar.gz --dir "$RUNNER_TEMP/m3-parents"
+            gh release download octave-parent-inputs-20261120 --repo "$GITHUB_REPOSITORY" --pattern string-02-input.tar.gz --dir "$RUNNER_TEMP/m3-parents"
+            cd "$RUNNER_TEMP/m3-parents"
+            echo 'f7b460937fc59a47f7dc28beb5f401cf7fedd47cb55d46bad50924108e83dd69  recovery-inputs.tar.gz' | sha256sum --check
+            echo '00d508162bb35ff21ed30a538bcfecb3c74991554b4f1546bd54607a67f8f4fd  component-inputs.tar.gz' | sha256sum --check
+            echo '335cdb985d87d2ebfd08e98c1dec516d93baec460070acda6b2bb822e438a427  string-02-input.tar.gz' | sha256sum --check
+            tar -xzf recovery-inputs.tar.gz
+            tar -xzf component-inputs.tar.gz
+            tar -xzf string-02-input.tar.gz
+          fi
           cd "$GITHUB_WORKSPACE/source"
           python3 -m pip install 'numpy>=2,<3'
           python3 -B -m unittest tests.test_octave_parent_measurement tests.test_portable_runtime_profile_generalization tests.test_portable_runtime_harmonic_identity 2>&1 | tee build/github-results/parent-contracts.log
@@ -418,7 +424,7 @@ jobs:
           M3_TEST_FILTER=offline_candidate_trace_preserves_output_and_partitioning build/portable/m3_motion_tests 2>&1 | tee build/github-results/parent-trace-test.log
           if [[ "$TASK" = octave-common-estimator ]]; then
             python3 -B -m unittest tests.test_portable_octave_common_estimator 2>&1 | tee build/github-results/common-contracts.log
-            python3 -B -m tools.portable_octave_common_estimator --binary build/portable/m3_replay --inputs "$RUNNER_TEMP/m3-parents" --corpus "$RUNNER_TEMP/m3-inputs/corpus" --inventory docs/recovery/octave-parent-inventory-20261120.json --sources docs/recovery/octave-parent-sources-20261120.json --plan docs/recovery/octave-common-estimator-plan-20261120.json --output build/github-results/octave-common-estimator 2>&1 | tee build/github-results/runner.log
+            python3 -B -m tools.portable_octave_common_estimator --binary build/portable/m3_replay --inputs "$RUNNER_TEMP/m3-parents" --corpus "$RUNNER_TEMP/m3-inputs/corpus" --inventory docs/recovery/octave-parent-inventory-20261120.json --sources docs/recovery/octave-parent-sources-20261120.json --plan docs/recovery/octave-common-estimator-plan-20261120.json --parent-report "$RUNNER_TEMP/retained-parents.json" --output build/github-results/octave-common-estimator 2>&1 | tee build/github-results/runner.log
           else
             python3 -B -m tools.portable_octave_parent_measurement --binary build/portable/m3_replay --inputs "$RUNNER_TEMP/m3-parents" --inventory docs/recovery/octave-parent-inventory-20261120.json --sources docs/recovery/octave-parent-sources-20261120.json --output build/github-results/octave-parent-measurement 2>&1 | tee build/github-results/runner.log
           fi
