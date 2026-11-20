@@ -416,8 +416,8 @@ jobs:
           printf '%s  %s\n' '4f7efa2ea0ba4d9025ff35c22d2bc48c9a5199a1ebb9b83c422c1bf10038829e' "$RUNNER_TEMP/m3-inputs/isolated/recovery-inputs.tar.gz" | sha256sum --check
           tar -xzf "$RUNNER_TEMP/m3-inputs/isolated/recovery-inputs.tar.gz" -C "$RUNNER_TEMP/m3-inputs/isolated"
           python3 -m pip install 'numpy>=2,<3' 'scipy>=1.14,<2'
-          python3 -B -m unittest tests.test_portable_cross_pitch_shape tests.test_cross_pitch_shape_fit 2>&1 | tee build/github-results/joint-fit-contracts.log
-          python3 -B -m tools.portable_cross_pitch_shape --manifest "$RUNNER_TEMP/m3-inputs/manifest.json" --input-root "$RUNNER_TEMP/m3-inputs" --output build/github-results/cross-pitch-shape/report.json 2>&1 | tee build/github-results/joint-fit-runner.log
+          python3 -B -m unittest tests.test_portable_cross_pitch_shape tests.test_cross_pitch_shape_fit tests.test_refined_cross_pitch_shape 2>&1 | tee build/github-results/joint-fit-contracts.log
+          python3 -B -m tools.portable_cross_pitch_shape --refine-frequencies --manifest "$RUNNER_TEMP/m3-inputs/manifest.json" --input-root "$RUNNER_TEMP/m3-inputs" --output build/github-results/cross-pitch-shape/report.json 2>&1 | tee build/github-results/joint-fit-runner.log
       - name: Screen early labeled string identity
         if: inputs.task == 'short-window-identity'
         working-directory: source
