@@ -408,8 +408,8 @@ jobs:
           OMP_NUM_THREADS: '1'
         run: |
           test "$DATASET" = ordinary
-          gh release download cross-pitch-frozen-20261120 --repo "$GITHUB_REPOSITORY" --pattern joint-fit-inputs.tar.gz --dir "$RUNNER_TEMP/m3-inputs"
-          printf '%s  %s\n' '298094eaaaa73aceedb49fcf056455347e50e4db6c4963f8c0e0ff22af861802' "$RUNNER_TEMP/m3-inputs/joint-fit-inputs.tar.gz" | sha256sum --check
+          gh release download cross-pitch-independent-20261120 --repo "$GITHUB_REPOSITORY" --pattern joint-fit-inputs.tar.gz --dir "$RUNNER_TEMP/m3-inputs"
+          printf '%s  %s\n' '5df56f612e33def68de141b62cbf7a8c012dc659d6f101224100265fbb58b7e9' "$RUNNER_TEMP/m3-inputs/joint-fit-inputs.tar.gz" | sha256sum --check
           tar -xzf "$RUNNER_TEMP/m3-inputs/joint-fit-inputs.tar.gz" -C "$RUNNER_TEMP/m3-inputs"
           python3 -m pip install 'numpy>=2,<3' 'scipy>=1.14,<2'
           python3 -B -m unittest tests.test_portable_cross_pitch_shape tests.test_cross_pitch_shape_fit tests.test_refined_cross_pitch_shape 2>&1 | tee build/github-results/joint-fit-contracts.log
