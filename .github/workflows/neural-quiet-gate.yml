@@ -5,9 +5,17 @@ on:
   workflow_dispatch:
     inputs:
       source_sha:
-        description: Frozen source commit containing the paired twelve-dataset optional gate screen
+        description: Frozen source commit containing the paired optional gate screen
         required: true
         type: string
+      spec_name:
+        description: Frozen recording set; no parameter changes
+        required: true
+        type: choice
+        default: neural-quiet-gate-20261121.json
+        options:
+          - neural-quiet-gate-20261121.json
+          - neural-quiet-gate-ordinary-20261121.json
 
 permissions:
   contents: read
@@ -19,6 +27,7 @@ concurrency:
 
 env:
   SOURCE_SHA: ${{ inputs.source_sha }}
+  M3_GATE_SPEC: ${{ inputs.spec_name }}
   INPUT_TAG: corpus-20261108
   INPUT_SHA256: adf6e36f2883538cfa3b0500ca0d936ed64fc6a1e12aeae3bd89e40dbf7c4254
   MODEL_SHA: fa5997af0a8210982619003269994a1be25eddf3
@@ -39,6 +48,10 @@ jobs:
           set -euo pipefail
           test "$GITHUB_REPOSITORY" = Ajuntanaga/m3-offload
           [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          case "$M3_GATE_SPEC" in
+            neural-quiet-gate-20261121.json|neural-quiet-gate-ordinary-20261121.json) ;;
+            *) exit 2 ;;
+          esac
           mkdir -p "$GITHUB_WORKSPACE/lab-logs"
       - uses: actions/checkout@v7
         with:
@@ -77,11 +90,11 @@ jobs:
       - name: Obtain pinned CPU SDK and record archive hash
         run: |
           set -euo pipefail
-          sdk_url=$(python -c 'import json; print(json.load(open("source/docs/recovery/neural-quiet-gate-20261121.json"))["sdk"]["url"])')
+          sdk_url=$(python -c 'import json,os; print(json.load(open("source/docs/recovery/"+os.environ["M3_GATE_SPEC"]))["sdk"]["url"])')
           curl --fail --location --max-time 180 "$sdk_url" --output "$RUNNER_TEMP/onnxruntime.nupkg" > "$GITHUB_WORKSPACE/lab-logs/sdk-download.log" 2>&1
           python - <<'PYSDK' | tee "$GITHUB_WORKSPACE/lab-logs/sdk-layout.log"
           import base64, hashlib, json, os, pathlib, zipfile
-          spec = json.loads(pathlib.Path('source/docs/recovery/neural-quiet-gate-20261121.json').read_text())['sdk']
+          spec = json.loads((pathlib.Path('source/docs/recovery') / os.environ['M3_GATE_SPEC']).read_text())['sdk']
           archive = pathlib.Path(os.environ['RUNNER_TEMP']) / 'onnxruntime.nupkg'
           h256, h512 = hashlib.sha256(), hashlib.sha512()
           with archive.open('rb') as f:
@@ -184,14 +197,14 @@ jobs:
           gh release download "$INPUT_TAG" --repo "$GITHUB_REPOSITORY" --pattern recovery-inputs.tar.gz --dir "$RUNNER_TEMP/m3-inputs" > "$GITHUB_WORKSPACE/lab-logs/input-download.log" 2>&1
           printf '%s  %s\n' "$INPUT_SHA256" "$RUNNER_TEMP/m3-inputs/recovery-inputs.tar.gz" | sha256sum --check | tee "$GITHUB_WORKSPACE/lab-logs/input-hash.log"
           tar -xzf "$RUNNER_TEMP/m3-inputs/recovery-inputs.tar.gz" -C "$RUNNER_TEMP/m3-inputs"
-      - name: Measure paired gate OFF and ON on twelve recordings
+      - name: Measure paired gate OFF and ON on the frozen recording set
         env:
           GH_TOKEN: ${{ github.token }}
         working-directory: source
         run: |
           set -euo pipefail
           python -m tools.portable_neural_quiet_gate \
-            --spec-path docs/recovery/neural-quiet-gate-20261121.json \
+            --spec-path "docs/recovery/$M3_GATE_SPEC" \
             --inputs "$RUNNER_TEMP/m3-inputs" \
             --model-checkout "$GITHUB_WORKSPACE/basic-pitch" \
             --harness "$GITHUB_WORKSPACE/lab-build/native/neural/neural_lab_harness" \
