@@ -1,0 +1,232 @@
+name: Neural Lab supplemental corpus
+run-name: 'Neural Lab corpus / ${{ inputs.source_sha }}'
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Frozen source commit containing the twelve-dataset supplemental screen
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: m3-private-processing
+  cancel-in-progress: false
+
+env:
+  SOURCE_SHA: ${{ inputs.source_sha }}
+  INPUT_TAG: corpus-20261108
+  INPUT_SHA256: adf6e36f2883538cfa3b0500ca0d936ed64fc6a1e12aeae3bd89e40dbf7c4254
+  MODEL_SHA: fa5997af0a8210982619003269994a1be25eddf3
+  PYTHONUNBUFFERED: '1'
+  OMP_NUM_THREADS: '2'
+  OPENBLAS_NUM_THREADS: '2'
+
+jobs:
+  measure:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check bounded dispatch inputs
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = Ajuntanaga/m3-offload
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          mkdir -p "$GITHUB_WORKSPACE/lab-logs"
+      - uses: actions/checkout@v7
+        with:
+          repository: Ajuntanaga/polyphonic-audio-to-midi
+          ref: ${{ inputs.source_sha }}
+          path: source
+          submodules: recursive
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          repository: spotify/basic-pitch
+          ref: fa5997af0a8210982619003269994a1be25eddf3
+          path: basic-pitch
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Record source and model pins
+        working-directory: source
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD > "$GITHUB_WORKSPACE/lab-logs/source-sha.txt"
+          test "$(cat "$GITHUB_WORKSPACE/lab-logs/source-sha.txt")" = "$SOURCE_SHA"
+          git -C "$GITHUB_WORKSPACE/basic-pitch" rev-parse HEAD > "$GITHUB_WORKSPACE/lab-logs/model-sha.txt"
+          test "$(cat "$GITHUB_WORKSPACE/lab-logs/model-sha.txt")" = "$MODEL_SHA"
+      - name: Install pinned numerical scoring dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check numpy==1.26.4 scipy==1.13.1 soundfile==0.12.1 onnx==1.17.0 2>&1 | tee "$GITHUB_WORKSPACE/lab-logs/dependencies.log"
+          python -m pip freeze --all > "$GITHUB_WORKSPACE/lab-logs/environment.txt"
+      - name: Install VST3 build dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update 2>&1 | tee "$GITHUB_WORKSPACE/lab-logs/apt-update.log"
+          sudo apt-get install -y --no-install-recommends libexpat1-dev libglib2.0-dev libcairo2-dev libfontconfig1-dev libfreetype6-dev libpango1.0-dev libwayland-dev libgtkmm-3.0-dev libatkmm-1.6-dev libsqlite3-dev pkg-config wayland-protocols libx11-dev libx11-xcb-dev libxcb-cursor-dev libxcb-keysyms1-dev libxcb-util-dev libxcb-xkb-dev libxkbcommon-dev libxkbcommon-x11-dev 2>&1 | tee "$GITHUB_WORKSPACE/lab-logs/apt-install.log"
+      - name: Obtain pinned CPU SDK and record archive hash
+        run: |
+          set -euo pipefail
+          sdk_url=$(python -c 'import json; print(json.load(open("source/docs/recovery/neural-lab-corpus-20261121.json"))["sdk"]["url"])')
+          curl --fail --location --max-time 180 "$sdk_url" --output "$RUNNER_TEMP/onnxruntime.nupkg" > "$GITHUB_WORKSPACE/lab-logs/sdk-download.log" 2>&1
+          python - <<'PYSDK' | tee "$GITHUB_WORKSPACE/lab-logs/sdk-layout.log"
+          import base64, hashlib, json, os, pathlib, zipfile
+          spec = json.loads(pathlib.Path('source/docs/recovery/neural-lab-corpus-20261121.json').read_text())['sdk']
+          archive = pathlib.Path(os.environ['RUNNER_TEMP']) / 'onnxruntime.nupkg'
+          h256, h512 = hashlib.sha256(), hashlib.sha512()
+          with archive.open('rb') as f:
+              for chunk in iter(lambda: f.read(1048576), b''):
+                  h256.update(chunk); h512.update(chunk)
+          assert archive.stat().st_size == spec['bytes'], 'SDK size mismatch'
+          assert base64.b64encode(h512.digest()).decode() == spec['sha512_base64'], 'SDK hash mismatch'
+          sdk = archive.parent / 'onnxruntime-linux-x64-1.20.1'
+          (sdk / 'include').mkdir(parents=True)
+          (sdk / 'lib').mkdir()
+          with zipfile.ZipFile(archive) as z:
+              licenses = [n for n in z.namelist() if pathlib.PurePosixPath(n).name.lower() in ('license', 'license.txt')]
+              assert licenses, 'SDK license missing'
+              license_member = min(licenses, key=lambda n: (len(pathlib.PurePosixPath(n).parts), n))
+              (sdk / 'LICENSE.txt').write_bytes(z.read(license_member))
+              notices = [n for n in z.namelist() if pathlib.PurePosixPath(n).name.lower() == 'thirdpartynotices.txt']
+              if notices:
+                  (sdk / 'ThirdPartyNotices.txt').write_bytes(z.read(notices[0]))
+              print('Runtime license:', license_member)
+              for member in z.namelist():
+                  if member.startswith('build/native/include/') and member.endswith('.h'):
+                      target = sdk / 'include' / pathlib.PurePosixPath(member).name
+                  elif member.startswith('runtimes/linux-x64/native/') and member.endswith('.so'):
+                      target = sdk / 'lib' / pathlib.PurePosixPath(member).name
+                  else:
+                      continue
+                  target.write_bytes(z.read(member))
+                  print(member, '->', target.name)
+          for soname in ('libonnxruntime.so.1', 'libonnxruntime.so.1.20.1'):
+              (sdk / 'lib' / soname).symlink_to('libonnxruntime.so')
+          assert (sdk / 'include/onnxruntime_cxx_api.h').is_file()
+          assert (sdk / 'lib/libonnxruntime.so').is_file()
+          log = pathlib.Path(os.environ['GITHUB_WORKSPACE']) / 'lab-logs/sdk-sha256.txt'
+          log.write_text(h256.hexdigest() + '  onnxruntime.nupkg\n')
+          with open(os.environ['GITHUB_ENV'], 'a') as f:
+              f.write('ORT_SDK_SHA256=' + h256.hexdigest() + '\n')
+          print('Pinned SHA512 verified; SHA256', h256.hexdigest())
+          PYSDK
+      - name: Export fixed downstream temporal crop without changing weights
+        working-directory: source
+        run: |
+          set -euo pipefail
+          python -m tools.neural_crop_model \
+            --source "$GITHUB_WORKSPACE/basic-pitch/basic_pitch/saved_models/icassp_2022/nmp.onnx" \
+            --destination "$RUNNER_TEMP/nmp-cropped.onnx" \
+            --report-path "$GITHUB_WORKSPACE/lab-logs/crop-export.json" \
+            2>&1 | tee "$GITHUB_WORKSPACE/lab-logs/crop-export.log"
+      - name: Build separate uninstalled VST3 lab and integration harness
+        working-directory: source
+        run: |
+          set -euo pipefail
+          python - <<'PYFILTER'
+          import os
+          from pathlib import Path
+          from tools.basic_pitch_streaming import CausalResampler
+          CausalResampler().h.astype('<f8').tofile(Path(os.environ['RUNNER_TEMP'])/'coefficients.f64')
+          PYFILTER
+          cmake -S . -B "$GITHUB_WORKSPACE/lab-build" -DCMAKE_BUILD_TYPE=Release -DM3_BUILD_NEURAL_LAB=ON -DM3_NEURAL_CROPPED_READOUT=ON \
+            -DORT_ROOT="$RUNNER_TEMP/onnxruntime-linux-x64-1.20.1" \
+            -DM3_NEURAL_MODEL="$RUNNER_TEMP/nmp-cropped.onnx" \
+            -DM3_NEURAL_FILTER="$RUNNER_TEMP/coefficients.f64" \
+            -DM3_NEURAL_MODEL_LICENSE="$GITHUB_WORKSPACE/basic-pitch/LICENSE" \
+            -DM3_NEURAL_RUNTIME_LICENSE="$RUNNER_TEMP/onnxruntime-linux-x64-1.20.1/LICENSE.txt" \
+            2>&1 | tee "$GITHUB_WORKSPACE/lab-logs/configure.log"
+          cmake --build "$GITHUB_WORKSPACE/lab-build" --parallel 2 --target m3_replay neural_core_tests neural_lab_tests neural_lab_harness neural_lab_bundle_test m3_neural_lab 2>&1 | tee "$GITHUB_WORKSPACE/lab-logs/build.log"
+      - name: Retain dependency notices in the bundle
+        run: |
+          set -euo pipefail
+          resources="$GITHUB_WORKSPACE/lab-build/VST3/M3_Neural_Lab.vst3/Contents/Resources"
+          if test -f "$RUNNER_TEMP/onnxruntime-linux-x64-1.20.1/ThirdPartyNotices.txt"; then
+            cp "$RUNNER_TEMP/onnxruntime-linux-x64-1.20.1/ThirdPartyNotices.txt" "$resources/RUNTIME-THIRD-PARTY.txt"
+          fi
+          cp source/third_party/vst3sdk/LICENSE.txt "$resources/VST3-LICENSE.txt"
+          cp lab-logs/crop-export.json "$resources/MODEL-CROP.json"
+          cp source/native/neural/CROP-README.txt "$resources/MODEL-CROP.txt"
+      - name: Check mechanics, package activation and report gates
+        working-directory: source
+        run: |
+          set -euo pipefail
+          ctest --test-dir "$GITHUB_WORKSPACE/lab-build" -R '^neural_' --output-on-failure 2>&1 | tee "$GITHUB_WORKSPACE/lab-logs/native-tests.log"
+          python -m unittest tests.test_neural_corpus tests.test_neural_lab tests.test_neural_crop tests.test_basic_pitch_native 2>&1 | tee "$GITHUB_WORKSPACE/lab-logs/python-tests.log"
+          python tools/validate_native_source.py . 2>&1 | tee "$GITHUB_WORKSPACE/lab-logs/source-policy.log"
+          mkdir -p "$RUNNER_TEMP/relocated"
+          cp -a "$GITHUB_WORKSPACE/lab-build/VST3/M3_Neural_Lab.vst3" "$RUNNER_TEMP/relocated/"
+          module="$RUNNER_TEMP/relocated/M3_Neural_Lab.vst3/Contents/x86_64-linux/M3_Neural_Lab.so"
+          readelf -d "$module" > "$GITHUB_WORKSPACE/lab-logs/package-dynamic.txt"
+          env -u LD_LIBRARY_PATH "$GITHUB_WORKSPACE/lab-build/native/neural/neural_lab_bundle_test" "$module" 2>&1 | tee "$GITHUB_WORKSPACE/lab-logs/package-load.log"
+      - name: Package experimental VST3 for remote retention
+        run: |
+          set -euo pipefail
+          mkdir -p neural-lab-package
+          tar -czf neural-lab-package/M3_Neural_Lab.vst3.tar.gz -C lab-build/VST3 M3_Neural_Lab.vst3
+          sha256sum neural-lab-package/M3_Neural_Lab.vst3.tar.gz > lab-logs/package-sha256.txt
+      - name: Download existing pinned inputs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/m3-inputs"
+          gh release download "$INPUT_TAG" --repo "$GITHUB_REPOSITORY" --pattern recovery-inputs.tar.gz --dir "$RUNNER_TEMP/m3-inputs" > "$GITHUB_WORKSPACE/lab-logs/input-download.log" 2>&1
+          printf '%s  %s\n' "$INPUT_SHA256" "$RUNNER_TEMP/m3-inputs/recovery-inputs.tar.gz" | sha256sum --check | tee "$GITHUB_WORKSPACE/lab-logs/input-hash.log"
+          tar -xzf "$RUNNER_TEMP/m3-inputs/recovery-inputs.tar.gz" -C "$RUNNER_TEMP/m3-inputs"
+      - name: Measure fresh CURRENT and actual component delivery on twelve recordings
+        env:
+          GH_TOKEN: ${{ github.token }}
+        working-directory: source
+        run: |
+          set -euo pipefail
+          python -m tools.portable_neural_corpus \
+            --spec-path docs/recovery/neural-lab-corpus-20261121.json \
+            --inputs "$RUNNER_TEMP/m3-inputs" \
+            --model-checkout "$GITHUB_WORKSPACE/basic-pitch" \
+            --replay "$GITHUB_WORKSPACE/lab-build/m3_replay" \
+            --harness "$GITHUB_WORKSPACE/lab-build/native/neural/neural_lab_harness" \
+            --bundle "$GITHUB_WORKSPACE/lab-build/VST3/M3_Neural_Lab.vst3" \
+            --output "$GITHUB_WORKSPACE/neural-corpus-result" \
+            --cropped-model "$RUNNER_TEMP/nmp-cropped.onnx" \
+            --crop-report "$GITHUB_WORKSPACE/lab-logs/crop-export.json" \
+            2>&1 | tee "$GITHUB_WORKSPACE/lab-logs/measurement.log"
+      - name: Retain small report and logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: m3-neural-lab-corpus-report-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            neural-corpus-result/report/
+            neural-corpus-result/logs/
+            lab-logs/
+          retention-days: 14
+          if-no-files-found: error
+      - name: Retain generated component evidence remotely
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: m3-neural-lab-corpus-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: neural-corpus-result/bulk/
+          retention-days: 14
+          if-no-files-found: warn
+          compression-level: 0
+      - name: Retain uninstalled plugin package remotely
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: m3-neural-lab-corpus-package-${{ github.run_id }}-${{ github.run_attempt }}
+          path: neural-lab-package/
+          retention-days: 14
+          if-no-files-found: warn
+          compression-level: 0
