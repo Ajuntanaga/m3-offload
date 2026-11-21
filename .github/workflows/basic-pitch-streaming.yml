@@ -1,0 +1,116 @@
+name: Basic Pitch causal streaming feasibility
+run-name: 'Basic Pitch streaming / ${{ inputs.source_sha }}'
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Approved full source commit containing the frozen streaming prototype
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: m3-private-processing
+  cancel-in-progress: false
+
+env:
+  SOURCE_SHA: ${{ inputs.source_sha }}
+  INPUT_TAG: corpus-20261108
+  INPUT_SHA256: adf6e36f2883538cfa3b0500ca0d936ed64fc6a1e12aeae3bd89e40dbf7c4254
+  MODEL_SHA: fa5997af0a8210982619003269994a1be25eddf3
+  PYTHONUNBUFFERED: '1'
+  OMP_NUM_THREADS: '2'
+  OPENBLAS_NUM_THREADS: '2'
+  NUMBA_NUM_THREADS: '2'
+
+jobs:
+  compare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check bounded dispatch inputs
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = Ajuntanaga/m3-offload
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          mkdir -p "$GITHUB_WORKSPACE/streaming-logs"
+      - uses: actions/checkout@v7
+        with:
+          repository: Ajuntanaga/polyphonic-audio-to-midi
+          ref: ${{ inputs.source_sha }}
+          path: source
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          repository: spotify/basic-pitch
+          ref: fa5997af0a8210982619003269994a1be25eddf3
+          path: basic-pitch
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Record source and model pins
+        working-directory: source
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD > "$GITHUB_WORKSPACE/streaming-logs/source-sha.txt"
+          test "$(cat "$GITHUB_WORKSPACE/streaming-logs/source-sha.txt")" = "$SOURCE_SHA"
+          git -C "$GITHUB_WORKSPACE/basic-pitch" rev-parse HEAD > "$GITHUB_WORKSPACE/streaming-logs/model-sha.txt"
+          test "$(cat "$GITHUB_WORKSPACE/streaming-logs/model-sha.txt")" = "$MODEL_SHA"
+      - name: Install pinned CPU inference dependencies
+        working-directory: source
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check -r tools/basic_pitch_requirements.txt 2>&1 | tee "$GITHUB_WORKSPACE/streaming-logs/dependencies.log"
+          python -m pip install --disable-pip-version-check --no-deps "$GITHUB_WORKSPACE/basic-pitch" 2>&1 | tee "$GITHUB_WORKSPACE/streaming-logs/basic-pitch-install.log"
+          python -m pip freeze --all > "$GITHUB_WORKSPACE/streaming-logs/environment.txt"
+      - name: Check causal mechanics and scoring with synthetic inputs
+        working-directory: source
+        run: |
+          set -euo pipefail
+          python -m unittest tests.test_basic_pitch_streaming tests.test_pitch_detector_comparison tests.test_midi_lifecycle_analysis 2>&1 | tee "$GITHUB_WORKSPACE/streaming-logs/tests.log"
+      - name: Download existing pinned inputs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/m3-inputs"
+          gh release download "$INPUT_TAG" --repo "$GITHUB_REPOSITORY" --pattern recovery-inputs.tar.gz --dir "$RUNNER_TEMP/m3-inputs" > "$GITHUB_WORKSPACE/streaming-logs/input-download.log" 2>&1
+          printf '%s  %s\n' "$INPUT_SHA256" "$RUNNER_TEMP/m3-inputs/recovery-inputs.tar.gz" | sha256sum --check | tee "$GITHUB_WORKSPACE/streaming-logs/input-hash.log"
+          tar -xzf "$RUNNER_TEMP/m3-inputs/recovery-inputs.tar.gz" -C "$RUNNER_TEMP/m3-inputs"
+      - name: Stream once on both recordings
+        working-directory: source
+        run: |
+          set -euo pipefail
+          python -m tools.portable_basic_pitch_streaming \
+            --spec docs/recovery/basic-pitch-streaming-20261121.json \
+            --inputs "$RUNNER_TEMP/m3-inputs" \
+            --model-checkout "$GITHUB_WORKSPACE/basic-pitch" \
+            --output "$GITHUB_WORKSPACE/basic-pitch-streaming-result" \
+            2>&1 | tee "$GITHUB_WORKSPACE/streaming-logs/comparison.log"
+      - name: Retain small report and logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: m3-basic-pitch-streaming-report-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            basic-pitch-streaming-result/report/
+            streaming-logs/
+          retention-days: 14
+          if-no-files-found: error
+      - name: Retain bulk model evidence remotely
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: m3-basic-pitch-streaming-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: basic-pitch-streaming-result/bulk/
+          retention-days: 14
+          if-no-files-found: warn
+          compression-level: 0
