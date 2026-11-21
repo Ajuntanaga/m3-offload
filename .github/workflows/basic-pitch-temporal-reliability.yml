@@ -1,0 +1,91 @@
+name: Basic Pitch temporal reliability feasibility
+run-name: 'Basic Pitch temporal reliability / ${{ inputs.source_sha }}'
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Frozen source commit for one temporal classifier screen
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: m3-private-processing
+  cancel-in-progress: false
+
+env:
+  SOURCE_SHA: ${{ inputs.source_sha }}
+  PYTHONUNBUFFERED: '1'
+  OMP_NUM_THREADS: '1'
+  OPENBLAS_NUM_THREADS: '1'
+
+jobs:
+  screen:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check bounded dispatch inputs
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = Ajuntanaga/m3-offload
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          mkdir -p "$GITHUB_WORKSPACE/temporal-logs"
+      - uses: actions/checkout@v7
+        with:
+          repository: Ajuntanaga/polyphonic-audio-to-midi
+          ref: ${{ inputs.source_sha }}
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Pin source and small CPU classifier dependencies
+        working-directory: source
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD > "$GITHUB_WORKSPACE/temporal-logs/source-sha.txt"
+          test "$(cat "$GITHUB_WORKSPACE/temporal-logs/source-sha.txt")" = "$SOURCE_SHA"
+          python -m pip install --disable-pip-version-check numpy==1.26.4 scipy==1.13.1 scikit-learn==1.7.2 joblib==1.5.2 threadpoolctl==3.6.0 2>&1 | tee "$GITHUB_WORKSPACE/temporal-logs/dependencies.log"
+          python -m pip freeze --all > "$GITHUB_WORKSPACE/temporal-logs/environment.txt"
+      - name: Verify synthetic causality, split, clock and scoring behavior
+        working-directory: source
+        run: |
+          set -euo pipefail
+          python -m unittest tests.test_basic_pitch_temporal_reliability tests.test_basic_pitch_cached_diagnosis tests.test_pitch_detector_comparison 2>&1 | tee "$GITHUB_WORKSPACE/temporal-logs/tests.log"
+      - name: Fit and screen the frozen cached-array model once
+        working-directory: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python -m tools.portable_basic_pitch_temporal_reliability \
+            --spec docs/recovery/basic-pitch-temporal-reliability-20261121.json \
+            --output "$GITHUB_WORKSPACE/basic-pitch-temporal-result" \
+            2>&1 | tee "$GITHUB_WORKSPACE/temporal-logs/screen.log"
+      - name: Retain small report and logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: m3-basic-pitch-temporal-report-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            basic-pitch-temporal-result/report/
+            basic-pitch-temporal-result/logs/
+            temporal-logs/
+          retention-days: 14
+          if-no-files-found: error
+      - name: Retain model and predictions remotely
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: m3-basic-pitch-temporal-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: basic-pitch-temporal-result/bulk/
+          retention-days: 14
+          if-no-files-found: warn
+          compression-level: 0
