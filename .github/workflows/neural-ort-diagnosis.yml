@@ -1,0 +1,135 @@
+name: Neural ORT synthetic diagnosis
+run-name: 'Neural ORT diagnosis / ${{ inputs.source_sha }}'
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Frozen synthetic-only diagnosis source commit
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: m3-private-processing
+  cancel-in-progress: false
+env:
+  SOURCE_SHA: ${{ inputs.source_sha }}
+  MODEL_SHA: fa5997af0a8210982619003269994a1be25eddf3
+  PYTHONUNBUFFERED: '1'
+jobs:
+  measure:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check bounded dispatch input
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = Ajuntanaga/m3-offload
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          mkdir -p "$GITHUB_WORKSPACE/diagnosis-logs"
+      - uses: actions/checkout@v7
+        with:
+          repository: Ajuntanaga/polyphonic-audio-to-midi
+          ref: ${{ inputs.source_sha }}
+          path: source
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          repository: spotify/basic-pitch
+          ref: fa5997af0a8210982619003269994a1be25eddf3
+          path: basic-pitch
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Record source and model pins
+        run: |
+          set -euo pipefail
+          git -C source rev-parse HEAD > diagnosis-logs/source-sha.txt
+          test "$(cat diagnosis-logs/source-sha.txt)" = "$SOURCE_SHA"
+          git -C basic-pitch rev-parse HEAD > diagnosis-logs/model-sha.txt
+          test "$(cat diagnosis-logs/model-sha.txt)" = "$MODEL_SHA"
+      - name: Obtain pinned CPU SDK and record archive hash
+        run: |
+          set -euo pipefail
+          sdk_url=$(python -c 'import json; print(json.load(open("source/docs/recovery/neural-lab-20261121.json"))["sdk"]["url"])')
+          curl --fail --location --max-time 180 "$sdk_url" --output "$RUNNER_TEMP/onnxruntime.nupkg" > "$GITHUB_WORKSPACE/diagnosis-logs/sdk-download.log" 2>&1
+          python - <<'PYSDK' | tee "$GITHUB_WORKSPACE/diagnosis-logs/sdk-layout.log"
+          import base64, hashlib, json, os, pathlib, zipfile
+          spec = json.loads(pathlib.Path('source/docs/recovery/neural-lab-20261121.json').read_text())['sdk']
+          archive = pathlib.Path(os.environ['RUNNER_TEMP']) / 'onnxruntime.nupkg'
+          h256, h512 = hashlib.sha256(), hashlib.sha512()
+          with archive.open('rb') as f:
+              for chunk in iter(lambda: f.read(1048576), b''):
+                  h256.update(chunk); h512.update(chunk)
+          assert archive.stat().st_size == spec['bytes'], 'SDK size mismatch'
+          assert base64.b64encode(h512.digest()).decode() == spec['sha512_base64'], 'SDK hash mismatch'
+          sdk = archive.parent / 'onnxruntime-linux-x64-1.20.1'
+          (sdk / 'include').mkdir(parents=True)
+          (sdk / 'lib').mkdir()
+          with zipfile.ZipFile(archive) as z:
+              licenses = [n for n in z.namelist() if pathlib.PurePosixPath(n).name.lower() in ('license', 'license.txt')]
+              assert licenses, 'SDK license missing'
+              license_member = min(licenses, key=lambda n: (len(pathlib.PurePosixPath(n).parts), n))
+              (sdk / 'LICENSE.txt').write_bytes(z.read(license_member))
+              notices = [n for n in z.namelist() if pathlib.PurePosixPath(n).name.lower() == 'thirdpartynotices.txt']
+              if notices:
+                  (sdk / 'ThirdPartyNotices.txt').write_bytes(z.read(notices[0]))
+              print('Runtime license:', license_member)
+              for member in z.namelist():
+                  if member.startswith('build/native/include/') and member.endswith('.h'):
+                      target = sdk / 'include' / pathlib.PurePosixPath(member).name
+                  elif member.startswith('runtimes/linux-x64/native/') and member.endswith('.so'):
+                      target = sdk / 'lib' / pathlib.PurePosixPath(member).name
+                  else:
+                      continue
+                  target.write_bytes(z.read(member))
+                  print(member, '->', target.name)
+          for soname in ('libonnxruntime.so.1', 'libonnxruntime.so.1.20.1'):
+              (sdk / 'lib' / soname).symlink_to('libonnxruntime.so')
+          assert (sdk / 'include/onnxruntime_cxx_api.h').is_file()
+          assert (sdk / 'lib/libonnxruntime.so').is_file()
+          log = pathlib.Path(os.environ['GITHUB_WORKSPACE']) / 'diagnosis-logs/sdk-sha256.txt'
+          log.write_text(h256.hexdigest() + '  onnxruntime.nupkg\n')
+          with open(os.environ['GITHUB_ENV'], 'a') as f:
+              f.write('ORT_SDK_SHA256=' + h256.hexdigest() + '\n')
+          print('Pinned SHA512 verified; SHA256', h256.hexdigest())
+          PYSDK
+      - name: Build synthetic diagnosis only
+        run: |
+          set -euo pipefail
+          cmake -S source/native/neural -B diagnosis-build -DCMAKE_BUILD_TYPE=Release \
+            -DORT_ROOT="$RUNNER_TEMP/onnxruntime-linux-x64-1.20.1" \
+            2>&1 | tee diagnosis-logs/configure.log
+          cmake --build diagnosis-build --target neural_ort_diagnosis --parallel 2 \
+            2>&1 | tee diagnosis-logs/build.log
+      - name: Measure fixed configurations and summarize profile
+        working-directory: source
+        run: |
+          set -euo pipefail
+          python -m tools.portable_neural_ort_diagnosis \
+            --harness "$GITHUB_WORKSPACE/diagnosis-build/neural_ort_diagnosis" \
+            --model "$GITHUB_WORKSPACE/basic-pitch/basic_pitch/saved_models/icassp_2022/nmp.onnx" \
+            --output "$GITHUB_WORKSPACE/diagnosis-result" \
+            2>&1 | tee "$GITHUB_WORKSPACE/diagnosis-logs/measurement.log"
+      - name: Retain small report and logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: m3-neural-ort-diagnosis-report-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            diagnosis-result/report/
+            diagnosis-logs/
+          retention-days: 14
+          if-no-files-found: error
+      - name: Retain generated profile remotely
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: m3-neural-ort-diagnosis-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: diagnosis-result/bulk/
+          retention-days: 14
+          if-no-files-found: warn
