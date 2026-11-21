@@ -1,0 +1,89 @@
+name: Neural Lab real REAPER host
+run-name: 'Neural Lab REAPER host / ${{ inputs.source_sha }}'
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Frozen observation source, existing plugin package reused
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: m3-private-processing
+  cancel-in-progress: false
+
+env:
+  SOURCE_SHA: ${{ inputs.source_sha }}
+  PYTHONUNBUFFERED: '1'
+  OMP_NUM_THREADS: '2'
+  OPENBLAS_NUM_THREADS: '2'
+
+jobs:
+  observe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check bounded dispatch
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = Ajuntanaga/m3-offload
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          mkdir -p host-logs
+      - uses: actions/checkout@v7
+        with:
+          repository: Ajuntanaga/polyphonic-audio-to-midi
+          ref: ${{ inputs.source_sha }}
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Record source pin and check report logic
+        working-directory: source
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD > "$GITHUB_WORKSPACE/host-logs/source-sha.txt"
+          test "$(cat "$GITHUB_WORKSPACE/host-logs/source-sha.txt")" = "$SOURCE_SHA"
+          python -m unittest tests.test_neural_reaper_host 2>&1 | tee "$GITHUB_WORKSPACE/host-logs/report-tests.log"
+      - name: Install isolated host runtime dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update 2>&1 | tee host-logs/apt-update.log
+          sudo apt-get install -y --no-install-recommends xvfb xauth x11-utils lua5.4 libgtk-3-0t64 libasound2t64 libx11-6 libxext6 libxi6 libxrender1 libfontconfig1 libfreetype6 2>&1 | tee host-logs/apt-install.log
+      - name: Observe pinned plugin in real REAPER with dummy audio
+        working-directory: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python -m tools.portable_neural_reaper_host \
+            --spec docs/recovery/neural-reaper-host-20261121.json \
+            --output "$GITHUB_WORKSPACE/neural-reaper-result" \
+            2>&1 | tee "$GITHUB_WORKSPACE/host-logs/observation.log"
+      - name: Retain small report and host logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: m3-neural-reaper-report-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            neural-reaper-result/report/
+            neural-reaper-result/logs/
+            host-logs/
+          retention-days: 14
+          if-no-files-found: error
+      - name: Retain generated host MIDI remotely
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: m3-neural-reaper-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: neural-reaper-result/bulk/
+          retention-days: 14
+          if-no-files-found: warn
