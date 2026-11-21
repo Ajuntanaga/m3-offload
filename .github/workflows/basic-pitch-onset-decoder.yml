@@ -1,0 +1,91 @@
+name: Basic Pitch onset-confirmed decoder
+run-name: 'Basic Pitch onset decoder / ${{ inputs.source_sha }}'
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Full source commit containing the frozen onset-confirmed decoder
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: m3-private-processing
+  cancel-in-progress: false
+
+env:
+  SOURCE_SHA: ${{ inputs.source_sha }}
+  PYTHONUNBUFFERED: '1'
+  OMP_NUM_THREADS: '1'
+  OPENBLAS_NUM_THREADS: '1'
+
+jobs:
+  compare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check bounded dispatch inputs
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = Ajuntanaga/m3-offload
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          mkdir -p "$GITHUB_WORKSPACE/onset-logs"
+      - uses: actions/checkout@v7
+        with:
+          repository: Ajuntanaga/polyphonic-audio-to-midi
+          ref: ${{ inputs.source_sha }}
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Record source and install pinned array reader
+        working-directory: source
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD > "$GITHUB_WORKSPACE/onset-logs/source-sha.txt"
+          test "$(cat "$GITHUB_WORKSPACE/onset-logs/source-sha.txt")" = "$SOURCE_SHA"
+          python -m pip install --disable-pip-version-check numpy==1.26.4 2>&1 | tee "$GITHUB_WORKSPACE/onset-logs/dependencies.log"
+          python -m pip freeze --all > "$GITHUB_WORKSPACE/onset-logs/environment.txt"
+      - name: Check synthetic clock and scoring behavior
+        working-directory: source
+        run: |
+          set -euo pipefail
+          python -m unittest tests.test_basic_pitch_onset_decoder tests.test_basic_pitch_cached_diagnosis tests.test_pitch_detector_comparison tests.test_midi_lifecycle_analysis 2>&1 | tee "$GITHUB_WORKSPACE/onset-logs/tests.log"
+      - name: Compare pinned caches once without inference
+        working-directory: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python -m tools.portable_basic_pitch_onset_decoder \
+            --spec docs/recovery/basic-pitch-onset-decoder-20261121.json \
+            --output "$GITHUB_WORKSPACE/basic-pitch-onset-result" \
+            2>&1 | tee "$GITHUB_WORKSPACE/onset-logs/comparison.log"
+      - name: Retain small report and logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: m3-basic-pitch-onset-report-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            basic-pitch-onset-result/report/
+            basic-pitch-onset-result/logs/
+            onset-logs/
+          retention-days: 14
+          if-no-files-found: error
+      - name: Retain derived event evidence remotely
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: m3-basic-pitch-onset-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: basic-pitch-onset-result/bulk/
+          retention-days: 14
+          if-no-files-found: warn
+          compression-level: 0
