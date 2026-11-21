@@ -57,7 +57,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update 2>&1 | tee host-logs/apt-update.log
-          sudo apt-get install -y --no-install-recommends xvfb xauth x11-utils lua5.4 libgtk-3-0t64 libasound2t64 libx11-6 libxext6 libxi6 libxrender1 libfontconfig1 libfreetype6 2>&1 | tee host-logs/apt-install.log
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends jackd2 jack-tools xvfb xauth x11-utils lua5.4 libgtk-3-0t64 libasound2t64 libx11-6 libxext6 libxi6 libxrender1 libfontconfig1 libfreetype6 2>&1 | tee host-logs/apt-install.log
       - name: Observe pinned plugin in real REAPER with dummy audio
         working-directory: source
         env:
