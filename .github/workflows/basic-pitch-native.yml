@@ -68,13 +68,44 @@ jobs:
           set -euo pipefail
           python -m pip install --disable-pip-version-check numpy==1.26.4 scipy==1.13.1 soundfile==0.12.1 2>&1 | tee "$GITHUB_WORKSPACE/native-logs/dependencies.log"
           python -m pip freeze --all > "$GITHUB_WORKSPACE/native-logs/environment.txt"
-      - name: Obtain versioned CPU SDK and record archive hash
+      - name: Obtain pinned CPU SDK and record archive hash
         run: |
           set -euo pipefail
-          curl --fail --location --max-time 180 https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-linux-x64-1.20.1.tgz --output "$RUNNER_TEMP/onnxruntime-linux-x64-1.20.1.tgz" > "$GITHUB_WORKSPACE/native-logs/sdk-download.log" 2>&1
-          sha256sum "$RUNNER_TEMP/onnxruntime-linux-x64-1.20.1.tgz" > "$GITHUB_WORKSPACE/native-logs/sdk-sha256.txt"
-          printf 'ORT_SDK_SHA256=%s\n' "$(cut -d ' ' -f 1 "$GITHUB_WORKSPACE/native-logs/sdk-sha256.txt")" >> "$GITHUB_ENV"
-          tar -xzf "$RUNNER_TEMP/onnxruntime-linux-x64-1.20.1.tgz" -C "$RUNNER_TEMP"
+          sdk_url=$(python -c 'import json; print(json.load(open("source/docs/recovery/basic-pitch-native-20261121.json"))["sdk"]["url"])')
+          curl --fail --location --max-time 180 "$sdk_url" --output "$RUNNER_TEMP/onnxruntime.nupkg" > "$GITHUB_WORKSPACE/native-logs/sdk-download.log" 2>&1
+          python - <<'PYSDK' | tee "$GITHUB_WORKSPACE/native-logs/sdk-layout.log"
+          import base64, hashlib, json, os, pathlib, zipfile
+          spec = json.loads(pathlib.Path('source/docs/recovery/basic-pitch-native-20261121.json').read_text())['sdk']
+          archive = pathlib.Path(os.environ['RUNNER_TEMP']) / 'onnxruntime.nupkg'
+          h256, h512 = hashlib.sha256(), hashlib.sha512()
+          with archive.open('rb') as f:
+              for chunk in iter(lambda: f.read(1048576), b''):
+                  h256.update(chunk); h512.update(chunk)
+          assert archive.stat().st_size == spec['bytes'], 'SDK size mismatch'
+          assert base64.b64encode(h512.digest()).decode() == spec['sha512_base64'], 'SDK hash mismatch'
+          sdk = archive.parent / 'onnxruntime-linux-x64-1.20.1'
+          (sdk / 'include').mkdir(parents=True)
+          (sdk / 'lib').mkdir()
+          with zipfile.ZipFile(archive) as z:
+              for member in z.namelist():
+                  if member.startswith('build/native/include/') and member.endswith('.h'):
+                      target = sdk / 'include' / pathlib.PurePosixPath(member).name
+                  elif member.startswith('runtimes/linux-x64/native/') and member.endswith('.so'):
+                      target = sdk / 'lib' / pathlib.PurePosixPath(member).name
+                  else:
+                      continue
+                  target.write_bytes(z.read(member))
+                  print(member, '->', target.name)
+          for soname in ('libonnxruntime.so.1', 'libonnxruntime.so.1.20.1'):
+              (sdk / 'lib' / soname).symlink_to('libonnxruntime.so')
+          assert (sdk / 'include/onnxruntime_cxx_api.h').is_file()
+          assert (sdk / 'lib/libonnxruntime.so').is_file()
+          log = pathlib.Path(os.environ['GITHUB_WORKSPACE']) / 'native-logs/sdk-sha256.txt'
+          log.write_text(h256.hexdigest() + '  onnxruntime.nupkg\n')
+          with open(os.environ['GITHUB_ENV'], 'a') as f:
+              f.write('ORT_SDK_SHA256=' + h256.hexdigest() + '\n')
+          print('Pinned SHA512 verified; SHA256', h256.hexdigest())
+          PYSDK
       - name: Build standalone native harness
         working-directory: source
         run: |
