@@ -94,6 +94,7 @@ jobs:
           set -euo pipefail
           python -m tools.portable_basic_pitch_bass_view \
             --spec docs/recovery/basic-pitch-bass-view-20261121.json \
+            --recovery-spec docs/recovery/basic-pitch-bass-view-recovery-20261121.json \
             --inputs "$RUNNER_TEMP/m3-inputs" \
             --model-checkout "$GITHUB_WORKSPACE/basic-pitch" \
             --output "$GITHUB_WORKSPACE/basic-pitch-bass-view-result" \
