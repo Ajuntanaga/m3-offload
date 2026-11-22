@@ -721,12 +721,17 @@ jobs:
         working-directory: source
         run: |
           python3 -B -m tools.portable_three_string_lock_trace --phase sustain --binary build/portable/m3_replay --corpus "$RUNNER_TEMP/m3-inputs/corpus" --manifest build/github-results/runtime-manifest.json --reference-report docs/recovery/three-string-sustain-references-20261115.json --output build/github-results/three-string-sustain-trace 2>&1 | tee build/github-results/runner.log
-      - name: Observe unfiltered ordinary candidates
+      - name: Observe unfiltered candidates against saved references
         if: inputs.task == 'unfiltered-observation'
         working-directory: source
         run: |
-          test "$DATASET" = ordinary
-          python3 -B -m tools.portable_unfiltered_observation --binary build/portable/m3_replay --corpus "$RUNNER_TEMP/m3-inputs/corpus" --manifest build/github-results/runtime-manifest.json --reference docs/recovery/ordinary-harmonic-fixed-competition-references-20261116.json --output build/github-results/unfiltered-observation 2>&1 | tee build/github-results/runner.log
+          case "$DATASET" in
+            ordinary) reference=docs/recovery/ordinary-harmonic-fixed-competition-references-20261116.json ;;
+            extended-middle) reference=docs/recovery/extended-middle-unfiltered-references-20261122.json ;;
+            *) echo "Unsupported unfiltered observation dataset" >&2; exit 1 ;;
+          esac
+          python3 -B -m unittest tests.test_portable_unfiltered_observation
+          python3 -B -m tools.portable_unfiltered_observation --dataset "$DATASET" --binary build/portable/m3_replay --corpus "$RUNNER_TEMP/m3-inputs/corpus" --manifest build/github-results/runtime-manifest.json --reference "$reference" --output build/github-results/unfiltered-observation 2>&1 | tee build/github-results/runner.log
       - name: Observe bounded weak-note residual controls
         if: inputs.task == 'weak-note-residual-trace'
         working-directory: source
