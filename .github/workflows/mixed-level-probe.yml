@@ -1,0 +1,83 @@
+name: Synthetic mixed-level Basic Pitch probe
+run-name: 'Synthetic mixed-level probe / ${{ inputs.source_sha }}'
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Pinned source commit of the registered synthetic mixed-level probe (CPU, synthetic windows only, no recording)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: m3-mixed-level-probe
+  cancel-in-progress: false
+
+env:
+  SOURCE_SHA: ${{ inputs.source_sha }}
+  PYTHONUNBUFFERED: '1'
+  OMP_NUM_THREADS: '1'
+  OPENBLAS_NUM_THREADS: '1'
+  CUDA_VISIBLE_DEVICES: '-1'
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check bounded dispatch inputs
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = Ajuntanaga/m3-offload
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          mkdir -p "$GITHUB_WORKSPACE/mixed-level-logs"
+      - uses: actions/checkout@v7
+        with:
+          repository: Ajuntanaga/polyphonic-audio-to-midi
+          ref: ${{ inputs.source_sha }}
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Pin source and CPU runtime dependencies
+        working-directory: source
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD > "$GITHUB_WORKSPACE/mixed-level-logs/source-sha.txt"
+          test "$(cat "$GITHUB_WORKSPACE/mixed-level-logs/source-sha.txt")" = "$SOURCE_SHA"
+          python -m pip install --disable-pip-version-check numpy==1.26.4 scipy==1.13.1 soundfile==0.13.1 onnxruntime==1.20.1 onnx==1.17.0 2>&1 | tee "$GITHUB_WORKSPACE/mixed-level-logs/dependencies.log"
+          python -m pip freeze --all > "$GITHUB_WORKSPACE/mixed-level-logs/environment.txt"
+      - name: Check the probe protocol before any model runs
+        working-directory: source
+        run: |
+          set -euo pipefail
+          python -m unittest tests.test_mixed_level_probe tests.test_portable_mixed_level_probe 2>&1 | tee "$GITHUB_WORKSPACE/mixed-level-logs/tests.log"
+      - name: Run the synthetic windows through both pinned graphs once
+        working-directory: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          timeout --signal=TERM --kill-after=20s 25m \
+            python -m tools.portable_mixed_level_probe \
+            --spec docs/recovery/mixed-level-probe-20261122.json \
+            --output "$GITHUB_WORKSPACE/mixed-level-result" \
+            2>&1 | tee "$GITHUB_WORKSPACE/mixed-level-logs/probe.log"
+      - name: Retain the report and logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: m3-mixed-level-probe-report-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            mixed-level-result/report/
+            mixed-level-logs/
+          retention-days: 14
+          if-no-files-found: error
