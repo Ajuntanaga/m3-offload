@@ -1,0 +1,100 @@
+name: Basic Pitch synthetic release probe
+run-name: 'Basic Pitch release probe / ${{ inputs.source_sha }}'
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Pinned source commit of the synthetic abrupt-end versus smooth-decay release probe
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: m3-basic-pitch-release-probe
+  cancel-in-progress: false
+
+env:
+  SOURCE_SHA: ${{ inputs.source_sha }}
+  PYTHONUNBUFFERED: '1'
+  OMP_NUM_THREADS: '1'
+  OPENBLAS_NUM_THREADS: '1'
+  CUDA_VISIBLE_DEVICES: '-1'
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check bounded dispatch inputs
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = Ajuntanaga/m3-offload
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          mkdir -p "$GITHUB_WORKSPACE/basic-pitch-release-probe-logs"
+      - uses: actions/checkout@v7
+        with:
+          repository: Ajuntanaga/polyphonic-audio-to-midi
+          ref: ${{ inputs.source_sha }}
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Pin source and CPU inference dependencies
+        working-directory: source
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD > "$GITHUB_WORKSPACE/basic-pitch-release-probe-logs/source-sha.txt"
+          test "$(cat "$GITHUB_WORKSPACE/basic-pitch-release-probe-logs/source-sha.txt")" = "$SOURCE_SHA"
+          python -m pip install --disable-pip-version-check numpy==1.26.4 onnxruntime==1.20.1 2>&1 | tee "$GITHUB_WORKSPACE/basic-pitch-release-probe-logs/dependencies.log"
+          python -m pip freeze --all > "$GITHUB_WORKSPACE/basic-pitch-release-probe-logs/environment.txt"
+      - name: Verify the pure probe checks
+        working-directory: source
+        run: |
+          set -euo pipefail
+          python -m unittest tests.test_basic_pitch_release_probe 2>&1 | tee "$GITHUB_WORKSPACE/basic-pitch-release-probe-logs/tests.log"
+      - name: Download the pinned model evidence once
+        working-directory: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          RUN_ID=$(python -c "import json; print(json.load(open('docs/recovery/basic-pitch-release-probe-20261122.json'))['evidence']['run_id'])")
+          ARTIFACT=$(python -c "import json; print(json.load(open('docs/recovery/basic-pitch-release-probe-20261122.json'))['evidence']['artifact'])")
+          gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" --name "$ARTIFACT" --dir "$GITHUB_WORKSPACE/evidence" 2>&1 | tee "$GITHUB_WORKSPACE/basic-pitch-release-probe-logs/evidence-download.log"
+          find "$GITHUB_WORKSPACE/evidence" -maxdepth 3 -type f -name '*.onnx' -printf '%P %s\n' | tee "$GITHUB_WORKSPACE/basic-pitch-release-probe-logs/evidence-listing.txt"
+      - name: Measure release on abrupt and smooth-decay tones with both models
+        working-directory: source
+        run: |
+          set -euo pipefail
+          timeout --signal=TERM --kill-after=20s 15m \
+            python -m tools.portable_basic_pitch_release_probe \
+            --spec docs/recovery/basic-pitch-release-probe-20261122.json \
+            --evidence "$GITHUB_WORKSPACE/evidence" \
+            --output "$GITHUB_WORKSPACE/basic-pitch-release-probe-result" \
+            2>&1 | tee "$GITHUB_WORKSPACE/basic-pitch-release-probe-logs/probe.log"
+      - name: Retain compact report and logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: m3-basic-pitch-release-probe-report-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            basic-pitch-release-probe-result/report/
+            basic-pitch-release-probe-logs/
+          retention-days: 14
+          if-no-files-found: error
+      - name: Retain full model outputs remotely
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: m3-basic-pitch-release-probe-outputs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: basic-pitch-release-probe-result/bulk/
+          retention-days: 14
+          if-no-files-found: warn
