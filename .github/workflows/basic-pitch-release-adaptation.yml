@@ -1,0 +1,93 @@
+name: Basic Pitch release-context adaptation
+run-name: 'Basic Pitch release adaptation / ${{ inputs.source_sha }}'
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Frozen source for one release-context fit and fixed evaluation
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: m3-basic-pitch-release-adaptation
+  cancel-in-progress: false
+
+env:
+  SOURCE_SHA: ${{ inputs.source_sha }}
+  PYTHONUNBUFFERED: '1'
+  OMP_NUM_THREADS: '1'
+  OPENBLAS_NUM_THREADS: '1'
+  TF_ENABLE_ONEDNN_OPTS: '0'
+  TF_DETERMINISTIC_OPS: '1'
+  CUDA_VISIBLE_DEVICES: '-1'
+
+jobs:
+  release-adaptation:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 110
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check bounded dispatch inputs
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = Ajuntanaga/m3-offload
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          mkdir -p "$GITHUB_WORKSPACE/basic-pitch-release-adaptation-logs"
+      - uses: actions/checkout@v7
+        with:
+          repository: Ajuntanaga/polyphonic-audio-to-midi
+          ref: ${{ inputs.source_sha }}
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Pin source and release adaptation dependencies
+        working-directory: source
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD > "$GITHUB_WORKSPACE/basic-pitch-release-adaptation-logs/source-sha.txt"
+          test "$(cat "$GITHUB_WORKSPACE/basic-pitch-release-adaptation-logs/source-sha.txt")" = "$SOURCE_SHA"
+          python -m pip install --disable-pip-version-check numpy==1.26.4 scipy==1.13.1 soundfile==0.13.1 tensorflow-cpu==2.15.0 tf2onnx==1.16.1 onnx==1.17.0 onnxruntime==1.20.1 2>&1 | tee "$GITHUB_WORKSPACE/basic-pitch-release-adaptation-logs/dependencies.log"
+          python -m pip freeze --all > "$GITHUB_WORKSPACE/basic-pitch-release-adaptation-logs/environment.txt"
+      - name: Verify adaptation, export and release invariants
+        working-directory: source
+        run: |
+          set -euo pipefail
+          python -m unittest tests.test_basic_pitch_adaptation tests.test_basic_pitch_onnx_export tests.test_basic_pitch_flat_normalization tests.test_basic_pitch_release_adaptation 2>&1 | tee "$GITHUB_WORKSPACE/basic-pitch-release-adaptation-logs/tests.log"
+      - name: Fit release context and run fixed evaluation
+        working-directory: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          timeout --signal=TERM --kill-after=20s 100m \
+            python -m tools.portable_basic_pitch_release_adaptation \
+            --spec docs/recovery/basic-pitch-release-adaptation-20261122.json \
+            --output "$GITHUB_WORKSPACE/basic-pitch-release-adaptation-result" \
+            2>&1 | tee "$GITHUB_WORKSPACE/basic-pitch-release-adaptation-logs/release-adaptation.log"
+      - name: Retain small report and logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: m3-basic-pitch-release-adaptation-report-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            basic-pitch-release-adaptation-result/report/
+            basic-pitch-release-adaptation-logs/
+          retention-days: 14
+          if-no-files-found: error
+      - name: Retain model checkpoints and evidence remotely
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: m3-basic-pitch-release-adaptation-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: basic-pitch-release-adaptation-result/bulk/
+          retention-days: 14
+          if-no-files-found: warn
