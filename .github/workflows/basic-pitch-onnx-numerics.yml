@@ -1,0 +1,91 @@
+name: Synthetic Basic Pitch ONNX numerical localization
+run-name: 'Basic Pitch numerical localization / ${{ inputs.source_sha }}'
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Frozen synthetic-only numerical localization source
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: m3-basic-pitch-onnx-numerics
+  cancel-in-progress: false
+
+env:
+  SOURCE_SHA: ${{ inputs.source_sha }}
+  PYTHONUNBUFFERED: '1'
+  OMP_NUM_THREADS: '1'
+  OPENBLAS_NUM_THREADS: '1'
+  TF_ENABLE_ONEDNN_OPTS: '0'
+  TF_DETERMINISTIC_OPS: '1'
+  CUDA_VISIBLE_DEVICES: '-1'
+
+jobs:
+  convert-and-measure:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check bounded dispatch inputs
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = Ajuntanaga/m3-offload
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          mkdir -p "$GITHUB_WORKSPACE/basic-pitch-onnx-numerics-logs"
+      - uses: actions/checkout@v7
+        with:
+          repository: Ajuntanaga/polyphonic-audio-to-midi
+          ref: ${{ inputs.source_sha }}
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Pin source and CPU conversion dependencies
+        working-directory: source
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD > "$GITHUB_WORKSPACE/basic-pitch-onnx-numerics-logs/source-sha.txt"
+          test "$(cat "$GITHUB_WORKSPACE/basic-pitch-onnx-numerics-logs/source-sha.txt")" = "$SOURCE_SHA"
+          python -m pip install --disable-pip-version-check numpy==1.26.4 scipy==1.13.1 soundfile==0.13.1 tensorflow-cpu==2.15.0 tf2onnx==1.16.1 onnx==1.15.0 protobuf==3.20.3 onnxruntime==1.20.1 2>&1 | tee "$GITHUB_WORKSPACE/basic-pitch-onnx-numerics-logs/dependencies.log"
+          python -m pip freeze --all > "$GITHUB_WORKSPACE/basic-pitch-onnx-numerics-logs/environment.txt"
+      - name: Verify numerical comparison and export boundaries
+        working-directory: source
+        run: |
+          set -euo pipefail
+          python -m unittest tests.test_basic_pitch_onnx_export tests.test_basic_pitch_onnx_numerics 2>&1 | tee "$GITHUB_WORKSPACE/basic-pitch-onnx-numerics-logs/tests.log"
+      - name: Locate divergence on fixed synthetic signals
+        working-directory: source
+        run: |
+          set -euo pipefail
+          timeout --signal=TERM --kill-after=20s 15m \
+            python -m tools.basic_pitch_onnx_numerics \
+            --spec docs/recovery/basic-pitch-onnx-numerics-20261122.json \
+            --output "$GITHUB_WORKSPACE/basic-pitch-onnx-numerics-result" \
+            2>&1 | tee "$GITHUB_WORKSPACE/basic-pitch-onnx-numerics-logs/conversion.log"
+      - name: Retain compact report and logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: m3-basic-pitch-onnx-numerics-report-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            basic-pitch-onnx-numerics-result/report/
+            basic-pitch-onnx-numerics-logs/
+          retention-days: 14
+          if-no-files-found: error
+      - name: Retain frozen graphs and intermediate arrays remotely
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: m3-basic-pitch-onnx-numerics-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: basic-pitch-onnx-numerics-result/bulk/
+          retention-days: 14
+          if-no-files-found: warn
