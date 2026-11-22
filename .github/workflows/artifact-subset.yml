@@ -1,0 +1,65 @@
+name: Collect compact M3 evidence subset
+run-name: 'M3 evidence subset / ${{ inputs.source_sha }}'
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Frozen source with exact completed artifact and member pins
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: m3-artifact-subset
+  cancel-in-progress: false
+
+env:
+  SOURCE_SHA: ${{ inputs.source_sha }}
+  PYTHONUNBUFFERED: '1'
+
+jobs:
+  collect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check bounded dispatch inputs
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = Ajuntanaga/m3-offload
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+      - uses: actions/checkout@v7
+        with:
+          repository: Ajuntanaga/polyphonic-audio-to-midi
+          ref: ${{ inputs.source_sha }}
+          path: source
+          persist-credentials: false
+      - name: Verify selected-file integrity checks
+        working-directory: source
+        run: python3 -m unittest tests.test_artifact_subset
+      - name: Verify existing artifact and collect only pinned JSON events
+        working-directory: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 -m tools.portable_artifact_subset \
+            --spec docs/recovery/basic-pitch-adaptation-events-20261122.json \
+            --output "$GITHUB_WORKSPACE/artifact-subset-result"
+      - name: Retain compact subset and collection receipt
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: m3-artifact-subset-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            artifact-subset-result/selected/
+            artifact-subset-result/receipt.json
+            artifact-subset-result/logs/
+          retention-days: 14
+          if-no-files-found: warn
