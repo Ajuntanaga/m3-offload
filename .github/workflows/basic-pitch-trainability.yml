@@ -1,0 +1,83 @@
+name: Basic Pitch pretrained trainability probe
+run-name: 'Basic Pitch trainability / ${{ inputs.source_sha }}'
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Frozen source for one public-model synthetic gradient check
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: m3-public-model-trainability
+  cancel-in-progress: false
+
+env:
+  SOURCE_SHA: ${{ inputs.source_sha }}
+  PYTHONUNBUFFERED: '1'
+  OMP_NUM_THREADS: '1'
+  OPENBLAS_NUM_THREADS: '1'
+  TF_ENABLE_ONEDNN_OPTS: '0'
+  TF_DETERMINISTIC_OPS: '1'
+  CUDA_VISIBLE_DEVICES: '-1'
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check bounded dispatch inputs
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = Ajuntanaga/m3-offload
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          mkdir -p "$GITHUB_WORKSPACE/basic-pitch-trainability-logs"
+      - uses: actions/checkout@v7
+        with:
+          repository: Ajuntanaga/polyphonic-audio-to-midi
+          ref: ${{ inputs.source_sha }}
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Pin source and CPU dependencies
+        working-directory: source
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD > "$GITHUB_WORKSPACE/basic-pitch-trainability-logs/source-sha.txt"
+          test "$(cat "$GITHUB_WORKSPACE/basic-pitch-trainability-logs/source-sha.txt")" = "$SOURCE_SHA"
+          python -m pip install --disable-pip-version-check numpy==1.26.4 tensorflow-cpu==2.15.0 onnxruntime==1.20.1 2>&1 | tee "$GITHUB_WORKSPACE/basic-pitch-trainability-logs/dependencies.log"
+          python -m pip freeze --all > "$GITHUB_WORKSPACE/basic-pitch-trainability-logs/environment.txt"
+      - name: Verify guard and model integrity checks
+        working-directory: source
+        run: |
+          set -euo pipefail
+          python -m unittest tests.test_basic_pitch_trainability 2>&1 | tee "$GITHUB_WORKSPACE/basic-pitch-trainability-logs/tests.log"
+      - name: Compare backends and test one gradient update with exact restoration
+        working-directory: source
+        run: |
+          set -euo pipefail
+          timeout --signal=TERM --kill-after=20s 10m \
+            python -m tools.portable_basic_pitch_trainability \
+            --spec docs/recovery/basic-pitch-trainability-20261122.json \
+            --output "$GITHUB_WORKSPACE/basic-pitch-trainability-result" \
+            2>&1 | tee "$GITHUB_WORKSPACE/basic-pitch-trainability-logs/probe.log"
+      - name: Retain report and logs only
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: m3-basic-pitch-trainability-report-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            basic-pitch-trainability-result/report.json
+            basic-pitch-trainability-logs/
+          retention-days: 14
+          if-no-files-found: error
