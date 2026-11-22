@@ -1,0 +1,139 @@
+name: Neural adapter synthetic contract
+run-name: 'Neural adapter contract / ${{ inputs.source_sha }}'
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact source revision for the four-layout native adapter
+        required: true
+        type: string
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: m3-neural-adapter-contract
+  cancel-in-progress: false
+env:
+  SOURCE_SHA: ${{ inputs.source_sha }}
+  PYTHONUNBUFFERED: '1'
+  OMP_NUM_THREADS: '2'
+  OPENBLAS_NUM_THREADS: '2'
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check bounded inputs
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = Ajuntanaga/m3-offload
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          mkdir -p "$GITHUB_WORKSPACE/adapter-logs"
+      - uses: actions/checkout@v7
+        with:
+          repository: Ajuntanaga/polyphonic-audio-to-midi
+          ref: ${{ inputs.source_sha }}
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Record source and install fixture dependencies
+        working-directory: source
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD > "$GITHUB_WORKSPACE/adapter-logs/source-sha.txt"
+          test "$(cat "$GITHUB_WORKSPACE/adapter-logs/source-sha.txt")" = "$SOURCE_SHA"
+          python -m pip install --disable-pip-version-check numpy==1.26.4 onnx==1.17.0 2>&1 | tee "$GITHUB_WORKSPACE/adapter-logs/dependencies.log"
+          python -m pip freeze --all > "$GITHUB_WORKSPACE/adapter-logs/environment.txt"
+      - name: Obtain pinned CPU SDK and record archive hash
+        run: |
+          set -euo pipefail
+          sdk_url=$(python -c 'import json; print(json.load(open("source/docs/recovery/neural-adapter-contract-20261122.json"))["sdk"]["url"])')
+          curl --fail --location --max-time 180 "$sdk_url" --output "$RUNNER_TEMP/onnxruntime.nupkg" > "$GITHUB_WORKSPACE/adapter-logs/sdk-download.log" 2>&1
+          python - <<'PYSDK' | tee "$GITHUB_WORKSPACE/adapter-logs/sdk-layout.log"
+          import base64, hashlib, json, os, pathlib, zipfile
+          spec = json.loads(pathlib.Path('source/docs/recovery/neural-adapter-contract-20261122.json').read_text())['sdk']
+          archive = pathlib.Path(os.environ['RUNNER_TEMP']) / 'onnxruntime.nupkg'
+          h256, h512 = hashlib.sha256(), hashlib.sha512()
+          with archive.open('rb') as f:
+              for chunk in iter(lambda: f.read(1048576), b''):
+                  h256.update(chunk); h512.update(chunk)
+          assert archive.stat().st_size == spec['bytes'], 'SDK size mismatch'
+          assert base64.b64encode(h512.digest()).decode() == spec['sha512_base64'], 'SDK hash mismatch'
+          sdk = archive.parent / 'onnxruntime-linux-x64-1.20.1'
+          (sdk / 'include').mkdir(parents=True)
+          (sdk / 'lib').mkdir()
+          with zipfile.ZipFile(archive) as z:
+              licenses = [n for n in z.namelist() if pathlib.PurePosixPath(n).name.lower() in ('license', 'license.txt')]
+              assert licenses, 'SDK license missing'
+              license_member = min(licenses, key=lambda n: (len(pathlib.PurePosixPath(n).parts), n))
+              (sdk / 'LICENSE.txt').write_bytes(z.read(license_member))
+              notices = [n for n in z.namelist() if pathlib.PurePosixPath(n).name.lower() == 'thirdpartynotices.txt']
+              if notices:
+                  (sdk / 'ThirdPartyNotices.txt').write_bytes(z.read(notices[0]))
+              print('Runtime license:', license_member)
+              for member in z.namelist():
+                  if member.startswith('build/native/include/') and member.endswith('.h'):
+                      target = sdk / 'include' / pathlib.PurePosixPath(member).name
+                  elif member.startswith('runtimes/linux-x64/native/') and member.endswith('.so'):
+                      target = sdk / 'lib' / pathlib.PurePosixPath(member).name
+                  else:
+                      continue
+                  target.write_bytes(z.read(member))
+                  print(member, '->', target.name)
+          for soname in ('libonnxruntime.so.1', 'libonnxruntime.so.1.20.1'):
+              (sdk / 'lib' / soname).symlink_to('libonnxruntime.so')
+          assert (sdk / 'include/onnxruntime_cxx_api.h').is_file()
+          assert (sdk / 'lib/libonnxruntime.so').is_file()
+          log = pathlib.Path(os.environ['GITHUB_WORKSPACE']) / 'adapter-logs/sdk-sha256.txt'
+          log.write_text(h256.hexdigest() + '  onnxruntime.nupkg\n')
+          with open(os.environ['GITHUB_ENV'], 'a') as f:
+              f.write('ORT_SDK_SHA256=' + h256.hexdigest() + '\n')
+          print('Pinned SHA512 verified; SHA256', h256.hexdigest())
+          PYSDK
+      - name: Generate arithmetic fixtures and compile adapter and core
+        working-directory: source
+        run: |
+          set -euo pipefail
+          python -m tools.neural_adapter_fixtures "$RUNNER_TEMP/adapter-fixtures" 2>&1 | tee "$GITHUB_WORKSPACE/adapter-logs/fixtures.log"
+          cmake -S native/neural -B "$GITHUB_WORKSPACE/adapter-build" -DCMAKE_BUILD_TYPE=Release \
+            -DORT_ROOT="$RUNNER_TEMP/onnxruntime-linux-x64-1.20.1" \
+            -DM3_NEURAL_ADAPTER_FIXTURES="$RUNNER_TEMP/adapter-fixtures" \
+            2>&1 | tee "$GITHUB_WORKSPACE/adapter-logs/configure.log"
+          cmake --build "$GITHUB_WORKSPACE/adapter-build" --parallel 2 \
+            2>&1 | tee "$GITHUB_WORKSPACE/adapter-logs/build.log"
+          for layout in legacy temporal; do
+            flags=()
+            if test "$layout" = temporal; then flags+=(-DM3_NEURAL_TEMPORAL_READOUT); fi
+            c++ -std=c++17 -O2 -Wall -Wextra -Wpedantic -ffp-contract=off "${flags[@]}" \
+              -I "$RUNNER_TEMP/onnxruntime-linux-x64-1.20.1/include" \
+              -c native/neural/lab_worker.cpp -o "$RUNNER_TEMP/worker-$layout.o" \
+              2>&1 | tee "$GITHUB_WORKSPACE/adapter-logs/worker-$layout.log"
+          done
+      - name: Run synthetic adapter and existing streaming core tests
+        run: |
+          set -euo pipefail
+          ctest --test-dir "$GITHUB_WORKSPACE/adapter-build" --output-on-failure \
+            2>&1 | tee "$GITHUB_WORKSPACE/adapter-logs/tests.log"
+          python - <<'PYREPORT'
+          import json, os
+          from pathlib import Path
+          report = dict(schema='m3_neural_adapter_contract_result_v1', source_commit=os.environ['SOURCE_SHA'],
+                        run_id=os.environ['GITHUB_RUN_ID'], state='passed', synthetic_only=True,
+                        installed_output_changed=False, corpus_quality_measured=False,
+                        native_runtime_timing_measured=False, layouts_tested=4,
+                        input_values_tested=[0,1], onnxruntime_version='1.20.1')
+          Path('adapter-logs/report.json').write_text(json.dumps(report,indent=2)+'\n')
+          PYREPORT
+      - name: Retain small report and logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: m3-neural-adapter-contract-report-${{ github.run_id }}-${{ github.run_attempt }}
+          path: adapter-logs/
+          retention-days: 14
+          if-no-files-found: error
