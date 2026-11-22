@@ -1,0 +1,71 @@
+name: M3 saved quiet-cell reduction
+run-name: 'Quiet-cell reduction / ${{ inputs.source_sha }}'
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Full frozen source commit in Ajuntanaga/polyphonic-audio-to-midi
+        required: true
+        type: string
+permissions:
+  contents: read
+  actions: read
+defaults:
+  run:
+    shell: bash
+concurrency:
+  group: m3-quiet-cell-reduction
+  cancel-in-progress: false
+env:
+  SOURCE_SHA: ${{ inputs.source_sha }}
+jobs:
+  reduction:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check destination and source selection
+        run: |
+          test "$GITHUB_REPOSITORY" = Ajuntanaga/m3-offload
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+      - uses: actions/checkout@v7
+        with:
+          repository: Ajuntanaga/polyphonic-audio-to-midi
+          ref: ${{ inputs.source_sha }}
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Check synthetic reduction contracts
+        working-directory: source
+        run: |
+          mkdir -p build/github-results
+          python3 -B -m unittest tests.test_quiet_cell_reduction 2>&1 | tee build/github-results/contracts.log
+      - name: Reduce the pinned saved cells once
+        env:
+          GH_TOKEN: ${{ github.token }}
+        working-directory: source
+        run: |
+          python3 -B -m tools.portable_quiet_cell_reduction \
+            --spec docs/recovery/quiet-cell-reduction-spec-20261122.json \
+            --output build/github-results/quiet-cell-reduction 2>&1 | tee build/github-results/runner.log
+      - name: Keep compact report and collection logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: m3-quiet-cell-reduction-report-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            source/build/github-results/*.log
+            source/build/github-results/quiet-cell-reduction/report/
+            source/build/github-results/quiet-cell-reduction/logs/
+      - name: Keep reduced tables separate from the source archive
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: m3-quiet-cell-reduction-tables-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 14
+          compression-level: 0
+          if-no-files-found: warn
+          path: source/build/github-results/quiet-cell-reduction/tables/
