@@ -1,0 +1,84 @@
+name: M3 fixture attack anatomy
+run-name: 'Fixture attack anatomy / ${{ inputs.source_sha }}'
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Full pinned descriptive observation commit
+        required: true
+        type: string
+permissions:
+  contents: read
+  actions: read
+defaults:
+  run:
+    shell: bash
+concurrency:
+  group: m3-fixture-attack-anatomy
+  cancel-in-progress: false
+env:
+  OPENBLAS_NUM_THREADS: 1
+  OMP_NUM_THREADS: 1
+  SOURCE_SHA: ${{ inputs.source_sha }}
+jobs:
+  compare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check destination and source selection
+        run: |
+          test "$GITHUB_REPOSITORY" = Ajuntanaga/m3-offload
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+      - uses: actions/checkout@v7
+        with:
+          repository: Ajuntanaga/polyphonic-audio-to-midi
+          ref: ${{ inputs.source_sha }}
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Prepare the pinned numerical runtime
+        working-directory: source
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          mkdir -p build/github-results
+          python -m pip install --disable-pip-version-check 'numpy==1.26.4' 'soundfile==0.13.1' 'scipy==1.11.4' 'matplotlib==3.8.4' 2>&1 | tee build/github-results/fixture-attack-anatomy-dependencies.log
+      - name: Fetch existing copied-note fixtures
+        working-directory: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api repos/Ajuntanaga/m3-offload/actions/artifacts/14807523635/zip > "$RUNNER_TEMP/m3-repluck-report.zip"
+          printf '%s  %s\n' e25f1423410ebfaff7eed59cdc8b9761e5972399fc0ea91d2e1056bd70067ff3 "$RUNNER_TEMP/m3-repluck-report.zip" | sha256sum --check
+          gh api repos/Ajuntanaga/m3-offload/actions/artifacts/14808656500/zip > "$RUNNER_TEMP/m3-repluck-evidence.zip"
+          printf '%s  %s\n' 4a89a38f2293bd0934af149b51470f93fd052278fb0db5f991ce69a0e316a518 "$RUNNER_TEMP/m3-repluck-evidence.zip" | sha256sum --check
+      - name: Test centered observation contracts
+        working-directory: source
+        run: |
+          python -B -m unittest tests.test_fixture_attack_anatomy 2>&1 | tee build/github-results/fixture-attack-anatomy-contracts.log
+      - name: Observe the two pinned copied excerpts once
+        working-directory: source
+        run: |
+          python -B -m tools.portable_fixture_attack_anatomy \
+            --source-sha "$SOURCE_SHA" \
+            --spec docs/recovery/fixture-attack-anatomy-20261123.json \
+            --report-archive "$RUNNER_TEMP/m3-repluck-report.zip" \
+            --evidence-archive "$RUNNER_TEMP/m3-repluck-evidence.zip" \
+            --output build/github-results/fixture-attack-anatomy \
+            2>&1 | tee build/github-results/fixture-attack-anatomy.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: m3-fixture-attack-anatomy-report-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 14
+          path: |
+            source/build/github-results/fixture-attack-anatomy/report.json
+            source/build/github-results/fixture-attack-anatomy/*.png
+            source/build/github-results/fixture-attack-anatomy*.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: m3-fixture-attack-anatomy-curves-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          path: source/build/github-results/fixture-attack-anatomy/*-curves.json.gz
