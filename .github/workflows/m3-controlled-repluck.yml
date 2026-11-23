@@ -1,0 +1,95 @@
+name: M3 controlled recorded attack repeat
+run-name: 'Controlled recorded attacks / ${{ inputs.source_sha }}'
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Full pinned comparison harness commit
+        required: true
+        type: string
+permissions:
+  contents: read
+  actions: read
+defaults:
+  run:
+    shell: bash
+concurrency:
+  group: m3-controlled-repluck
+  cancel-in-progress: false
+env:
+  SOURCE_SHA: ${{ inputs.source_sha }}
+jobs:
+  compare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Check destination and source selection
+        run: |
+          test "$GITHUB_REPOSITORY" = Ajuntanaga/m3-offload
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+      - uses: actions/checkout@v7
+        with:
+          repository: Ajuntanaga/polyphonic-audio-to-midi
+          ref: ${{ inputs.source_sha }}
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Install recorded-fixture reader and existing binary dependencies
+        run: |
+          python -m pip install numpy==1.26.4 soundfile==0.13.1
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends \
+            libexpat1-dev libglib2.0-dev libcairo2-dev libfontconfig1-dev \
+            libfreetype6-dev libpango1.0-dev libwayland-dev \
+            libgtkmm-3.0-dev libatkmm-1.6-dev libsqlite3-dev pkg-config \
+            wayland-protocols libx11-dev libx11-xcb-dev libxcb-cursor-dev \
+            libxcb-keysyms1-dev libxcb-util-dev libxcb-xkb-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev
+      - name: Fetch pinned corpus and previously tested binary archive
+        working-directory: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          mkdir -p "$RUNNER_TEMP/m3-inputs" build/github-results
+          gh release download corpus-20261108 --repo "$GITHUB_REPOSITORY" --pattern recovery-inputs.tar.gz --dir "$RUNNER_TEMP/m3-inputs"
+          printf '%s  %s\n' adf6e36f2883538cfa3b0500ca0d936ed64fc6a1e12aeae3bd89e40dbf7c4254 "$RUNNER_TEMP/m3-inputs/recovery-inputs.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/m3-inputs/recovery-inputs.tar.gz" -C "$RUNNER_TEMP/m3-inputs"
+          rm "$RUNNER_TEMP/m3-inputs/recovery-inputs.tar.gz"
+          gh api repos/Ajuntanaga/m3-offload/actions/artifacts/14807466382/zip > "$RUNNER_TEMP/m3-binary-reference.zip"
+          printf '%s  %s\n' 763dd5aad719aaa2f72d9dc2376ccaff5447ad3159b8aa2bd8cb756c1f4c9cce "$RUNNER_TEMP/m3-binary-reference.zip" | sha256sum --check
+      - name: Check fixture and callback contracts
+        working-directory: source
+        run: |
+          python -B -m unittest tests.test_controlled_repluck tests.test_portable_vst3_corpus_replay 2>&1 | tee build/github-results/controlled-repluck-contracts.log
+      - name: Run fixed recorded attacks through the saved VST3 binary
+        working-directory: source
+        run: |
+          python -B -m tools.portable_vst3_controlled_repluck \
+            --source-sha "$SOURCE_SHA" \
+            --spec docs/recovery/controlled-repluck-20261123.json \
+            --corpus "$RUNNER_TEMP/m3-inputs/corpus" \
+            --manifest "$RUNNER_TEMP/m3-inputs/recovery-inputs.json" \
+            --binary-archive "$RUNNER_TEMP/m3-binary-reference.zip" \
+            --output build/github-results/controlled-repluck \
+            2>&1 | tee build/github-results/controlled-repluck.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: m3-controlled-repluck-report-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 14
+          path: |
+            source/build/github-results/controlled-repluck/report.json
+            source/build/github-results/controlled-repluck/**/*.json
+            source/build/github-results/controlled-repluck/**/*.stderr
+            source/build/github-results/*.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: m3-controlled-repluck-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          path: |
+            source/build/github-results/controlled-repluck/**/*.tsv.gz
+            source/build/github-results/controlled-repluck/fixtures/**/*.wav
