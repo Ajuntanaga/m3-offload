@@ -1,0 +1,62 @@
+name: M3 saved quiet-cell restart evidence
+run-name: 'Quiet-cell restart evidence / ${{ inputs.source_sha }}'
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Full frozen source commit in Ajuntanaga/polyphonic-audio-to-midi
+        required: true
+        type: string
+permissions:
+  contents: read
+  actions: read
+defaults:
+  run:
+    shell: bash
+concurrency:
+  group: m3-quiet-cell-restart-analysis
+  cancel-in-progress: false
+env:
+  SOURCE_SHA: ${{ inputs.source_sha }}
+jobs:
+  saved-analysis:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check destination and source selection
+        run: |
+          test "$GITHUB_REPOSITORY" = Ajuntanaga/m3-offload
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+      - uses: actions/checkout@v7
+        with:
+          repository: Ajuntanaga/polyphonic-audio-to-midi
+          ref: ${{ inputs.source_sha }}
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Check synthetic analysis contracts
+        working-directory: source
+        run: |
+          mkdir -p build/github-results
+          python3 -B -m unittest tests.test_quiet_cell_restart_analysis 2>&1 | tee build/github-results/contracts.log
+      - name: Analyze the pinned saved intervals once
+        env:
+          GH_TOKEN: ${{ github.token }}
+        working-directory: source
+        run: |
+          python3 -B -m tools.portable_quiet_cell_restart_analysis \
+            --spec docs/recovery/quiet-cell-restart-spec-20261122.json \
+            --output build/github-results/quiet-cell-restart 2>&1 | tee build/github-results/runner.log
+      - name: Keep compact result and provenance logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: m3-quiet-cell-restart-report-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            source/build/github-results/*.log
+            source/build/github-results/quiet-cell-restart/report/
+            source/build/github-results/quiet-cell-restart/logs/
