@@ -57,6 +57,10 @@ jobs:
           from pathlib import Path
           original = Path(os.environ['RUNNER_TEMP']) / 'm3-inputs/recovery-inputs.json'
           manifest = json.loads(original.read_text())
+          corpus = original.parent / 'corpus'
+          missing = [name for name in manifest['files'] if not (corpus / name).is_file()]
+          if missing:
+              raise FileNotFoundError('Frozen corpus layout is incomplete: ' + ', '.join(missing))
           manifest['source'] = dict(repository='Ajuntanaga/polyphonic-audio-to-midi',
               commit=os.environ['SOURCE_SHA'], provider='github-actions',
               worker_repository=os.environ['GITHUB_REPOSITORY'],
@@ -83,7 +87,7 @@ jobs:
         run: |
           python3 -u -m tools.portable_batch_cell_corpus \
             --binary build/batch-cell-corpus-native/m3_replay \
-            --corpus "$RUNNER_TEMP/m3-inputs" \
+            --corpus "$RUNNER_TEMP/m3-inputs/corpus" \
             --manifest build/github-results/runtime-manifest.json \
             --reference-report docs/recovery/batch-cell-corpus-references-20261122.json \
             --replay-timeout-seconds 900 --max-seconds 9000 \
