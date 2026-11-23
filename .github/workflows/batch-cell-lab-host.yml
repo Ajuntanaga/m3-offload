@@ -55,10 +55,20 @@ jobs:
           test "$(cat "$GITHUB_WORKSPACE/host-logs/source-sha.txt")" = "$SOURCE_SHA"
           python -m unittest tests.test_batch_cell_host 2>&1 | tee "$GITHUB_WORKSPACE/host-logs/report-tests.log"
       - name: Install isolated build and host dependencies
+        timeout-minutes: 16
         run: |
           set -euo pipefail
-          sudo apt-get update 2>&1 | tee host-logs/apt-update.log
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+          # The previous job exhausted its deadline retrying the regional HTTP mirror.
+          test -f /etc/apt/apt-mirrors.txt
+          cat /etc/apt/apt-mirrors.txt > host-logs/apt-mirrors-original.txt
+          printf '%s\n' 'https://archive.ubuntu.com/ubuntu' \
+            | sudo tee /etc/apt/apt-mirrors.txt | tee host-logs/apt-mirrors-selected.txt
+          apt_options=(-o Acquire::Retries=1 -o Acquire::http::Timeout=20 \
+            -o Acquire::https::Timeout=20 -o Acquire::Languages=none)
+          sudo timeout --kill-after=15s 300s apt-get "${apt_options[@]}" \
+            -o APT::Update::Error-Mode=any update 2>&1 | tee host-logs/apt-update.log
+          sudo env DEBIAN_FRONTEND=noninteractive timeout --kill-after=15s 600s \
+            apt-get "${apt_options[@]}" install -y --no-install-recommends \
             jackd2 jack-tools xvfb xauth x11-utils lua5.4 libgtk-3-0t64 \
             libasound2t64 libx11-6 libxext6 libxi6 libxrender1 libfontconfig1 libfreetype6 \
             libexpat1-dev libglib2.0-dev libcairo2-dev libfontconfig1-dev \
