@@ -1,0 +1,81 @@
+name: Audio envelope check at suppressed note-ons
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+defaults:
+  run:
+    shell: bash
+concurrency:
+  group: m3-audio-envelope-check
+  cancel-in-progress: false
+env:
+  INPUT_TAG: corpus-20261108
+  INPUT_SHA256: adf6e36f2883538cfa3b0500ca0d936ed64fc6a1e12aeae3bd89e40dbf7c4254
+jobs:
+  envelope:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Fetch and verify the frozen input bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = Ajuntanaga/m3-offload
+          mkdir -p "$RUNNER_TEMP/in" out
+          gh release download "$INPUT_TAG" --repo "$GITHUB_REPOSITORY" --pattern recovery-inputs.tar.gz --dir "$RUNNER_TEMP/in"
+          printf '%s  %s\n' "$INPUT_SHA256" "$RUNNER_TEMP/in/recovery-inputs.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/in/recovery-inputs.tar.gz" -C "$RUNNER_TEMP/in"
+          rm "$RUNNER_TEMP/in/recovery-inputs.tar.gz"
+      - name: Envelope at each suppressed note-on
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet numpy scipy soundfile
+          python3 -B - <<'PY'
+          import json, os
+          from pathlib import Path
+          import numpy as np, scipy.signal as s, soundfile as sf
+          corpus = Path(os.environ['RUNNER_TEMP']) / 'in/corpus'
+          # (dataset, midi note, [suppressed note-on samples], label start)
+          TARGETS = [('constructed', 51, [7210303, 7210431, 7210559, 7211007], 7142453),
+                     ('physical-highmid', 56, [990399], None),
+                     ('physical-high', 60, [1679935, 2055615], None)]
+          result = {}
+          for name, note, samples, start in TARGETS:
+              path = corpus / (name + '.wav')
+              info = sf.info(str(path))
+              sr = info.samplerate
+              rows = []
+              for smp in samples:
+                  lo = max(0, smp - 96000 * 2)
+                  hi = min(info.frames, smp + 96000)
+                  x, _ = sf.read(str(path), start=lo, stop=hi, dtype='float64', always_2d=False)
+                  f = 440.0 * 2 ** ((note - 69) / 12)
+                  sos = s.butter(4, [f * 0.96, f * 1.04], btype='band', fs=sr, output='sos')
+                  env = np.abs(s.hilbert(s.sosfiltfilt(sos, x)))
+                  k = int(0.005 * sr)
+                  e = np.convolve(env, np.ones(k) / k, 'same')
+                  def at(off): return float(e[smp - lo + off])
+                  ms = sr // 1000
+                  # largest 20 ms rise over the 3 s window, and its offset from the event
+                  step = 20 * ms
+                  idx = range(ms * 10, len(e) - step - ms * 10, 5 * ms)
+                  rise = [(e[i + step] / max(e[i], 1e-12), i) for i in idx]
+                  best, bi = max(rise)
+                  local = [r for r, i in rise if abs(i - (smp - lo)) <= 40 * ms]
+                  rows.append(dict(sample=smp, env_minus_50ms=at(-50 * ms), env_at=at(0), env_plus_50ms=at(50 * ms),
+                                   env_plus_300ms=at(min(300 * ms, len(e) - 1 - (smp - lo))),
+                                   max_20ms_rise_within_40ms_of_event=max(local),
+                                   max_20ms_rise_in_3s_window=best,
+                                   max_rise_offset_ms=(bi + step // 2 - (smp - lo)) / ms))
+              result[name] = dict(sample_rate=sr, channels=info.channels, frames=info.frames, note=note, events=rows)
+          Path('out/report.json').write_text(json.dumps(result, indent=1) + '\n')
+          print(json.dumps(result, indent=1))
+          PY
+      - uses: actions/upload-artifact@v7
+        with:
+          name: audio-envelope-${{ github.run_id }}
+          retention-days: 14
+          if-no-files-found: error
+          path: out/report.json
