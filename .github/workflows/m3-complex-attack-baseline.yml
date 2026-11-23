@@ -1,0 +1,78 @@
+name: M3 complex attack baseline
+run-name: 'Complex attack baseline / ${{ inputs.source_sha }}'
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Full pinned standalone baseline commit
+        required: true
+        type: string
+permissions:
+  contents: read
+  actions: read
+defaults:
+  run:
+    shell: bash
+concurrency:
+  group: m3-complex-attack-baseline
+  cancel-in-progress: false
+env:
+  SOURCE_SHA: ${{ inputs.source_sha }}
+jobs:
+  compare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check destination and source selection
+        run: |
+          test "$GITHUB_REPOSITORY" = Ajuntanaga/m3-offload
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+      - uses: actions/checkout@v7
+        with:
+          repository: Ajuntanaga/polyphonic-audio-to-midi
+          ref: ${{ inputs.source_sha }}
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Prepare the pinned standalone baseline
+        working-directory: source
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          mkdir -p build/github-results
+          python -m pip install --disable-pip-version-check 'numpy==1.26.4' 'soundfile==0.13.1' 'setuptools==69.5.1' 'wheel==0.43.0' 2>&1 | tee build/github-results/complex-attack-dependencies.log
+          curl --fail --location --output "$RUNNER_TEMP/aubio-0.4.9.tar.gz" https://files.pythonhosted.org/packages/cd/80/302d89240603e5347c7f8026c8b02c59f8dfaec66c91a743d82de7c86006/aubio-0.4.9.tar.gz
+          printf '%s  %s\n' df1244f6c4cf5bea382c8c2d35aa43bc31f4cf631fe325ae3992c219546a4202 "$RUNNER_TEMP/aubio-0.4.9.tar.gz" | sha256sum --check
+          python -m pip install --disable-pip-version-check --no-build-isolation --no-deps "$RUNNER_TEMP/aubio-0.4.9.tar.gz" 2>&1 | tee build/github-results/complex-attack-build.log
+      - name: Fetch only existing six-fixture evidence
+        working-directory: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api repos/Ajuntanaga/m3-offload/actions/artifacts/14807523635/zip > "$RUNNER_TEMP/m3-repluck-report.zip"
+          printf '%s  %s\n' e25f1423410ebfaff7eed59cdc8b9761e5972399fc0ea91d2e1056bd70067ff3 "$RUNNER_TEMP/m3-repluck-report.zip" | sha256sum --check
+          gh api repos/Ajuntanaga/m3-offload/actions/artifacts/14808656500/zip > "$RUNNER_TEMP/m3-repluck-evidence.zip"
+          printf '%s  %s\n' 4a89a38f2293bd0934af149b51470f93fd052278fb0db5f991ce69a0e316a518 "$RUNNER_TEMP/m3-repluck-evidence.zip" | sha256sum --check
+      - name: Test clock and comparison contracts
+        working-directory: source
+        run: |
+          python -B -m unittest tests.test_complex_attack_baseline 2>&1 | tee build/github-results/complex-attack-contracts.log
+      - name: Run the frozen standalone attack comparison
+        working-directory: source
+        run: |
+          python -B -m tools.portable_complex_attack_baseline \
+            --source-sha "$SOURCE_SHA" \
+            --spec docs/recovery/complex-attack-baseline-20261123.json \
+            --report-archive "$RUNNER_TEMP/m3-repluck-report.zip" \
+            --evidence-archive "$RUNNER_TEMP/m3-repluck-evidence.zip" \
+            --output build/github-results/complex-attack-baseline \
+            2>&1 | tee build/github-results/complex-attack.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: m3-complex-attack-report-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 14
+          path: |
+            source/build/github-results/complex-attack-baseline/report.json
+            source/build/github-results/complex-attack*.log
