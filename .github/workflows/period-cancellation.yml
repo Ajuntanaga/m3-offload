@@ -1,0 +1,93 @@
+name: Period cancellation mechanism screen
+run-name: 'Period cancellation / ${{ inputs.source_sha }}'
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Frozen source commit for one bounded cancellation screen
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: m3-private-processing
+  cancel-in-progress: false
+
+env:
+  SOURCE_SHA: ${{ inputs.source_sha }}
+  PINNED_SOURCE_SHA: a181cde9605d41d6e7c89aa14ed8d1d2bc2d757c
+  PYTHONUNBUFFERED: '1'
+  OMP_NUM_THREADS: '1'
+  OPENBLAS_NUM_THREADS: '1'
+
+jobs:
+  screen:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check bounded dispatch inputs
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = Ajuntanaga/m3-offload
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$SOURCE_SHA" = "$PINNED_SOURCE_SHA"
+          mkdir -p "$GITHUB_WORKSPACE/period-cancellation-logs"
+      - uses: actions/checkout@v7
+        with:
+          repository: Ajuntanaga/polyphonic-audio-to-midi
+          ref: ${{ inputs.source_sha }}
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Pin source and CPU dependencies
+        working-directory: source
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD > "$GITHUB_WORKSPACE/period-cancellation-logs/source-sha.txt"
+          test "$(cat "$GITHUB_WORKSPACE/period-cancellation-logs/source-sha.txt")" = "$SOURCE_SHA"
+          python -m pip install --disable-pip-version-check numpy==1.26.4 soundfile==0.13.1 2>&1 | tee "$GITHUB_WORKSPACE/period-cancellation-logs/dependencies.log"
+          python -m pip freeze --all > "$GITHUB_WORKSPACE/period-cancellation-logs/environment.txt"
+      - name: Check pure accounting and cancellation contracts
+        working-directory: source
+        run: |
+          set -euo pipefail
+          python -m unittest tests.test_period_cancellation 2>&1 | tee "$GITHUB_WORKSPACE/period-cancellation-logs/tests.log"
+      - name: One fixed cancellation screen on the pinned mixtures
+        working-directory: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python -m tools.portable_period_cancellation \
+            --spec docs/recovery/period-cancellation-20261123.json \
+            --output "$GITHUB_WORKSPACE/period-cancellation-result" \
+            2>&1 | tee "$GITHUB_WORKSPACE/period-cancellation-logs/screen.log"
+      - name: Retain small report and logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: m3-period-cancellation-report-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            period-cancellation-result/report/
+            period-cancellation-result/logs/
+            period-cancellation-logs/
+          retention-days: 14
+          if-no-files-found: error
+      - name: Retain query evidence remotely
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: m3-period-cancellation-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: period-cancellation-result/bulk/
+          retention-days: 14
+          if-no-files-found: warn
+          compression-level: 0
