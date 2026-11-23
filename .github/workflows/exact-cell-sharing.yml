@@ -88,6 +88,7 @@ jobs:
             --corpus "$RUNNER_TEMP/m3-inputs/corpus" \
             --manifest build/github-results/runtime-manifest.json \
             --reference-report docs/recovery/completion-midi-retention-timing-references-20261115.json \
+            --companion-reference-report docs/recovery/exact-cell-sharing-companion-references-20261122.json \
             --output build/github-results/exact-cell-sharing 2>&1 | tee build/github-results/runner.log
       - name: Keep small report and logs
         if: always()
