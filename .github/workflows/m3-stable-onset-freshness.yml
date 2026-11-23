@@ -1,0 +1,90 @@
+name: M3 stable-note adjacent onset guard
+run-name: 'Stable onset guard / ${{ inputs.source_sha }}'
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Full pinned diagnostic guard and harness commit
+        required: true
+        type: string
+permissions:
+  contents: read
+  actions: read
+defaults:
+  run:
+    shell: bash
+concurrency:
+  group: m3-stable-onset-freshness
+  cancel-in-progress: false
+env:
+  SOURCE_SHA: ${{ inputs.source_sha }}
+jobs:
+  observe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Check destination and source selection
+        run: |
+          test "$GITHUB_REPOSITORY" = Ajuntanaga/m3-offload
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+      - uses: actions/checkout@v7
+        with:
+          repository: Ajuntanaga/polyphonic-audio-to-midi
+          ref: ${{ inputs.source_sha }}
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Fetch pinned calibration and previous fixture evidence
+        working-directory: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          mkdir -p "$RUNNER_TEMP/m3-inputs" build/github-results
+          gh release download corpus-20261108 --repo "$GITHUB_REPOSITORY" --pattern recovery-inputs.tar.gz --dir "$RUNNER_TEMP/m3-inputs"
+          printf '%s  %s\n' adf6e36f2883538cfa3b0500ca0d936ed64fc6a1e12aeae3bd89e40dbf7c4254 "$RUNNER_TEMP/m3-inputs/recovery-inputs.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/m3-inputs/recovery-inputs.tar.gz" -C "$RUNNER_TEMP/m3-inputs"
+          rm "$RUNNER_TEMP/m3-inputs/recovery-inputs.tar.gz"
+          gh api repos/Ajuntanaga/m3-offload/actions/artifacts/14807523635/zip > "$RUNNER_TEMP/m3-repluck-report.zip"
+          printf '%s  %s\n' e25f1423410ebfaff7eed59cdc8b9761e5972399fc0ea91d2e1056bd70067ff3 "$RUNNER_TEMP/m3-repluck-report.zip" | sha256sum --check
+          gh api repos/Ajuntanaga/m3-offload/actions/artifacts/14808656500/zip > "$RUNNER_TEMP/m3-repluck-evidence.zip"
+          printf '%s  %s\n' 4a89a38f2293bd0934af149b51470f93fd052278fb0db5f991ce69a0e316a518 "$RUNNER_TEMP/m3-repluck-evidence.zip" | sha256sum --check
+      - name: Test fixed comparison contracts
+        working-directory: source
+        run: |
+          python -B -m unittest tests.test_stable_onset_freshness 2>&1 | tee build/github-results/stable-onset-freshness-contracts.log
+      - name: Run fixed guard screen with identity companions
+        working-directory: source
+        run: |
+          python -B -m tools.portable_stable_onset_freshness \
+            --source-sha "$SOURCE_SHA" \
+            --spec docs/recovery/stable-onset-freshness-20261123.json \
+            --corpus "$RUNNER_TEMP/m3-inputs/corpus" \
+            --manifest "$RUNNER_TEMP/m3-inputs/recovery-inputs.json" \
+            --report-archive "$RUNNER_TEMP/m3-repluck-report.zip" \
+            --evidence-archive "$RUNNER_TEMP/m3-repluck-evidence.zip" \
+            --output build/github-results/stable-onset-freshness \
+            2>&1 | tee build/github-results/stable-onset-freshness.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: m3-stable-onset-freshness-report-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 14
+          path: |
+            source/build/github-results/stable-onset-freshness/report.json
+            source/build/github-results/stable-onset-freshness/reference-report.json
+            source/build/github-results/stable-onset-freshness/*/*/*-ledger.json
+            source/build/github-results/stable-onset-freshness/*/*/timing.json
+            source/build/github-results/stable-onset-freshness/**/*.stderr
+            source/build/github-results/stable-onset-freshness/*.log
+            source/build/github-results/stable-onset-freshness*.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: m3-stable-onset-freshness-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          path: |
+            source/build/github-results/stable-onset-freshness/*/*/*.tsv.gz
+            source/build/github-results/stable-onset-freshness/*/*/*.jsonl.gz
